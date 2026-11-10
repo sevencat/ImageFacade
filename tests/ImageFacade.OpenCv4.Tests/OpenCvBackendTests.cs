@@ -3,6 +3,7 @@ using ImageFacade.OpenCvSharp;
 using Xunit;
 using Cv2 = OpenCvSharp.Cv2;
 using CvMat = OpenCvSharp.Mat;
+using CvMatType = global::OpenCvSharp.MatType;
 using CvRect = OpenCvSharp.Rect;
 using CvScalar = OpenCvSharp.Scalar;
 
@@ -204,6 +205,25 @@ public sealed class OpenCvBackendTests
         Assert.Equal(ImageFormat.Png, loaded.SourceFormat);
         Assert.Equal(new Rgba32(0, 128, 255), loaded.GetPixel(8, 8));
         Assert.Equal(0, loaded.GetPixel(0, 0).A);
+    }
+
+    [Fact]
+    public void Load_SixteenBit_Png_Is_Normalized_To_EightBit()
+    {
+        using var engine = CreateEngine();
+
+        // 16 位 BGRA：不按 1/257 缩放会饱和成一片白，且每像素 8 字节会让 width*4 全部算错
+        using var deep = new CvMat(4, 4, CvMatType.CV_16UC4, new CvScalar(32768, 16384, 65535, 65535));
+        Assert.Equal(2L, deep.ElemSize1());
+
+        Cv2.ImEncode(".png", deep, out byte[] png);
+        using FacadeImage loaded = engine.Load(png);
+
+        Rgba32 pixel = loaded.GetPixel(2, 2);
+        Assert.InRange(pixel.R, (byte)253, (byte)255);   // 65535 / 257 = 255
+        Assert.InRange(pixel.G, (byte)62, (byte)65);     // 16384 / 257 ≈ 63.7
+        Assert.InRange(pixel.B, (byte)126, (byte)129);   // 32768 / 257 ≈ 127.5
+        Assert.Equal((byte)255, pixel.A);
     }
 
     [Fact]

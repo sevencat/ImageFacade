@@ -28,6 +28,13 @@ namespace ImageFacade.OpenCvSharp;
 /// </summary>
 /// <remarks>
 /// <para>
+/// 通道顺序**刻意与门面相反**（BGRA vs RGBA）：OpenCV 的 <c>ImDecode</c> / <c>ImEncode</c> 只认
+/// BGR / BGRA，内部若改存 RGBA，每次"打开"和"保存"都要多一次全图转换。代价只在
+/// <c>FromPixels</c> / <c>CopyPixelsTo</c> 这一对边界上付（本来就要按 stride 逐行搬运，顺带换通道），
+/// 且共用同一个 <c>SwapRedBlue</c>。Skia 用 <c>Rgba8888 Premul</c>、ImageSharp 用 <c>Image&lt;Rgba32&gt;</c>、
+/// 软后端用预乘 <c>Rgba32</c>，它们原生就是 RGBA，所以**唯独 OpenCV 是 BGRA 的例外**。
+/// </para>
+/// <para>
 /// 形状绘制受 OpenCV 本身限制：<b>没有 alpha 混合</b>，<c>color.A &lt; 255</c> 的
 /// <c>Fill/Draw/Line</c> 一律返回 <c>false</c>，由门面抛 <see cref="FeatureNotSupportedException"/>；
 /// 需要半透明形状时在调用方自行合成，或改用 Skia / ImageSharp。
@@ -562,7 +569,38 @@ public sealed class OpenCvBackend : IImageBackend
 
     // ---- 内部：通道 ----
 
+    /// <summary>
+    /// 解码结果归一成"8 位 + 4 通道 BGRA"。<c>ImDecode(Unchanged)</c> 既保留通道数也保留位深，
+    /// 而帧的契约是每像素固定 4 字节，两者都得在这里抹平。
+    /// </summary>
     private static CvMat ToBgra(CvMat source)
+    {
+        // 16 位 PNG 会解出 CV_16UC3/CV_16UC4：Channels() 照样是 3/4，但每像素是 6/8 字节，
+        // 直接往下走会让 CopyRows / TryGetPixel / BlendGlyphs 里的 width*4 全部算错。
+        if (source.ElemSize1() != 1)
+        {
+            CvMat normalized = ToEightBit(source);
+            CvMat? owned = normalized;
+            try
+            {
+                CvMat result = ConvertChannels(normalized);
+                if (ReferenceEquals(result, normalized))
+                {
+                    owned = null;   // 4 通道：这块 Mat 直接交给帧，别在这里释放
+                }
+
+                return result;
+            }
+            finally
+            {
+                owned?.Dispose();
+            }
+        }
+
+        return ConvertChannels(source);
+    }
+
+    private static CvMat ConvertChannels(CvMat source)
     {
         switch (source.Channels())
         {
@@ -576,6 +614,25 @@ public sealed class OpenCvBackend : IImageBackend
                 return MergeGrayAlpha(source);
             default:
                 throw new ImageBackendException("opencv", $"不支持的通道数：{source.Channels()}。");
+        }
+    }
+
+    /// <summary>
+    /// 降到 8 位。深度按 16 位处理（<c>1/257</c>：65535 → 255）——
+    /// 直接 <c>ConvertTo</c> 不缩放会饱和成一片白。
+    /// </summary>
+    private static CvMat ToEightBit(CvMat source)
+    {
+        var destination = new CvMat();
+        try
+        {
+            source.ConvertTo(destination, CvMatType.CV_8U, 1.0 / 257.0);
+            return destination;
+        }
+        catch
+        {
+            destination.Dispose();
+            throw;
         }
     }
 
