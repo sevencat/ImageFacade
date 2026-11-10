@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <AssemblyName>ImageFacade.ImageSharp</AssemblyName>
+    <RootNamespace>ImageFacade.ImageSharp</RootNamespace>
+    <DefineConstants>$(DefineConstants);IMAGESHARP3</DefineConstants>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- ImageSharp 有反射式解码器注册，不承诺 AOT（misc §I.9） -->
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SixLabors.ImageSharp" />
+    <PackageReference Include="SixLabors.ImageSharp.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\adapters\ImageSharpShared\**\*.cs"
+             Exclude="..\adapters\ImageSharpShared\bin\**;..\adapters\ImageSharpShared\obj\**"
+             Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

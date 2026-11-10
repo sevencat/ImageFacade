@@ -1,0 +1,18 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ImageFacade/ImageFacade.csproj" />
+    <Project Path="src/ImageFacade.Software/ImageFacade.Software.csproj" />
+    <Project Path="src/ImageFacade.SkiaSharp/ImageFacade.SkiaSharp.csproj" />
+    <Project Path="src/ImageFacade.SkiaSharp3/ImageFacade.SkiaSharp3.csproj" />
+    <Project Path="src/ImageFacade.OpenCvSharp/ImageFacade.OpenCvSharp.csproj" />
+    <Project Path="src/ImageFacade.OpenCvSharp5/ImageFacade.OpenCvSharp5.csproj" />
+    <Project Path="src/ImageFacade.ImageSharp/ImageFacade.ImageSharp.csproj" />
+    <Project Path="src/ImageFacade.ImageSharp2/ImageFacade.ImageSharp2.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ImageFacade.Tests/ImageFacade.Tests.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/ImageFacade.Samples/ImageFacade.Samples.csproj" />
+  </Folder>
+</Solution>

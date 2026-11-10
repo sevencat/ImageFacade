@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <AssemblyName>ImageFacade.SkiaSharp3</AssemblyName>
+    <RootNamespace>ImageFacade.SkiaSharp</RootNamespace>
+    <DefineConstants>$(DefineConstants);SKIA3</DefineConstants>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- CPM 下同一包不同版本的唯一干净写法（plan §6.5） -->
+    <PackageReference Include="SkiaSharp" VersionOverride="3.119.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\adapters\SkiaShared\**\*.cs"
+             Exclude="..\adapters\SkiaShared\bin\**;..\adapters\SkiaShared\obj\**"
+             Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

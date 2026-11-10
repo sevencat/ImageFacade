@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <AssemblyName>ImageFacade.OpenCvSharp</AssemblyName>
+    <RootNamespace>ImageFacade.OpenCvSharp</RootNamespace>
+    <DefineConstants>$(DefineConstants);OPENCV4</DefineConstants>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="OpenCvSharp4" />
+    <!-- 原生依赖按 RID 单独引；M6 接入（misc §G） -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\adapters\OpenCvShared\**\*.cs"
+             Exclude="..\adapters\OpenCvShared\bin\**;..\adapters\OpenCvShared\obj\**"
+             Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>
