@@ -22,6 +22,16 @@ public sealed class TextStyle
 {
     public FontRef Font { get; init; } = FontRef.BuiltIn;
 
+    /// <summary>
+    /// 已加载的字体实例；非空时**优先于** <see cref="Font"/>，托管文字后端（软件后端 / OpenCV 5 适配）
+    /// 直接复用它，不会重新解析字体表。
+    /// </summary>
+    /// <remarks>
+    /// 原生文字后端（Skia / ImageSharp）按 <see cref="Font"/> 解析平台字体，忽略本属性。
+    /// 想反复画同一批字又不重复解析时，用 <c>Font.BuiltIn</c> 或自己 <c>Font.Load(...)</c> 一次然后一直传。
+    /// </remarks>
+    public Font? FontFace { get; init; }
+
     public float Size { get; init; } = 16f;
 
     public Rgba32 Color { get; init; } = Rgba32.Black;

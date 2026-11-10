@@ -15,11 +15,14 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" />
+    <!-- 测试进程需要原生 Skia 库 -->
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
-    <ProjectReference Include="..\..\src\ImageFacade.Software\ImageFacade.Software.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.SdcbSimdCodecs\ImageFacade.SdcbSimdCodecs.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.SkiaSharp\ImageFacade.SkiaSharp.csproj" />
   </ItemGroup>
 
 </Project>

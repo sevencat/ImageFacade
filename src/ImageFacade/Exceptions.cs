@@ -36,7 +36,7 @@ public sealed class FeatureNotSupportedException : NotSupportedException
         string hint = fallback switch
         {
             FallbackMode.Disabled => "当前 Fallback = Disabled（严格模式），不会自动回退。",
-            _ => "没有可用的回退后端：引用 ImageFacade.Software，或在 ImageEngineOptions.FallbackBackend 里显式指定一个。",
+            _ => "没有可用的回退后端：引用 ImageFacade.SdcbSimdCodecs，或在 ImageEngineOptions.FallbackBackend 里显式指定一个。",
         };
 
         return $"后端 '{backendName}' 不支持能力 '{feature}'。{hint}";

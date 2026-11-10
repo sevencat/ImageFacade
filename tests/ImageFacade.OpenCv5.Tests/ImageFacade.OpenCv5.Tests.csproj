@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- 打不开 x86：OpenCvSharp 的原生库只有 win-x64 资产 -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RootNamespace>ImageFacade.Tests.OpenCv</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <IsAotCompatible>false</IsAotCompatible>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
+    <!-- 同一份测试源码按 OPENCV4/OPENCV5 分支：只有 5.x 有文字能力 -->
+    <DefineConstants>$(DefineConstants);OPENCV5</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="OpenCvSharp5.runtime.win" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.SdcbSimdCodecs\ImageFacade.SdcbSimdCodecs.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.OpenCvSharp5\ImageFacade.OpenCvSharp5.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 同一份测试源码：两个主版本各编一遍（plan §6.5） -->
+    <Compile Include="..\ImageFacade.OpenCv4.Tests\OpenCvBackendTests.cs"
+             Link="OpenCvBackendTests.cs" />
+  </ItemGroup>
+
+</Project>

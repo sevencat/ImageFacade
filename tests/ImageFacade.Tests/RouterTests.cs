@@ -192,7 +192,7 @@ public sealed class RouterTests
         FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(
             () => image.DrawText("x", PointF.Empty, new TextStyle { Size = 10 }));
 
-        Assert.Contains("ImageFacade.Software", ex.Message);
+        Assert.Contains("ImageFacade.SdcbSimdCodecs", ex.Message);
     }
 
     [Fact]

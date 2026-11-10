@@ -10,7 +10,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
-    <ProjectReference Include="..\..\src\ImageFacade.Software\ImageFacade.Software.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.SdcbSimdCodecs\ImageFacade.SdcbSimdCodecs.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.SkiaSharp\ImageFacade.SkiaSharp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 示例跑在本机，需要原生 Skia 库；适配包本身不引（plan §6.2） -->
+    <PackageReference Include="SkiaSharp.NativeAssets.Win32" />
   </ItemGroup>
 
 </Project>

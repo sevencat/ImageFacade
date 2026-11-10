@@ -1,7 +1,7 @@
 namespace ImageFacade.Backends;
 
 /// <summary>
-/// 软后端的注册点。<c>ImageFacade.Software</c> 通过 <see cref="System.Runtime.CompilerServices.ModuleInitializerAttribute"/>
+/// 软后端的注册点。<c>ImageFacade.SdcbSimdCodecs</c> 通过 <see cref="System.Runtime.CompilerServices.ModuleInitializerAttribute"/>
 /// 在程序集加载时注册工厂；**没有引用它就没有回退**（plan §5.5）。
 /// </summary>
 public static class SoftwareFallback

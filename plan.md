@@ -1,6 +1,6 @@
 # ImageFacade 设计与计划
 
-一句话：**一套 API，八个包**（轻量核心 `ImageFacade` + 纯托管 `ImageFacade.Software` + `SkiaSharp` 3/4、`OpenCvSharp` 4/5、`ImageSharp` 2/3 六个适配包），覆盖加载 / 保存 / Resize / 画点 / 画线 / 画文字，外加 letterbox、张量化、NMS、检测框绘制。某个后端缺的能力自动落到 `ImageFacade.Software` 的软渲染，调用方代码一个字都不用改。
+一句话：**一套 API，八个包**（轻量核心 `ImageFacade` + 纯托管 `ImageFacade.SdcbSimdCodecs` + `SkiaSharp` 3/4、`OpenCvSharp` 4/5、`ImageSharp` 2/3 六个适配包），覆盖加载 / 保存 / Resize / 画点 / 画线 / 画文字，外加 letterbox、张量化、NMS、检测框绘制。某个后端缺的能力自动落到 `ImageFacade.SdcbSimdCodecs` 的软渲染，调用方代码一个字都不用改。
 
 > 本文只放设计与计划。命名取舍、许可证、逐 API 映射、各库的坑、被否决的方案全部在 [`misc.md`](misc.md)。
 
@@ -21,7 +21,7 @@
 | 画文字 | 单行/多行/自动折行/对齐，中英文，字体来自系统、文件、内存或内置 |
 | 测量 | `MeasureText` 与绘制使用**同一套排版结果**（同一后端的测量与绘制必须自洽） |
 | 像素互操作 | `CopyPixelsTo` / `FromPixels`（**缺省 RGBA32**，另支持 BGRA/RGB/BGR/Gray，任意 stride），进阶 `AcquirePixels` |
-| 自动回退 | 后端不支持的能力 → 迁移到 `ImageFacade.Software` 的软后端执行；软后端也能当主角（纯托管、无原生依赖） |
+| 自动回退 | 后端不支持的能力 → 迁移到 `ImageFacade.SdcbSimdCodecs` 的软后端执行；软后端也能当主角（纯托管、无原生依赖） |
 | 视频帧友好 | 指针级导入/导出（ffmpeg `AVFrame`、相机缓冲、Avalonia `WriteableBitmap`），稳定态零额外分配 |
 | 检测流水线默认件 | letterbox、张量化（NCHW/NHWC、RGB/BGR、归一化）、**NMS**、检测框+标签绘制、坐标反算 |
 | 多主版本 | 同一套 API 适配 SkiaSharp 3/4、OpenCvSharp 4/5、ImageSharp 2/3，每个主版本一个适配包 |
@@ -42,7 +42,7 @@
 ### 1.3 五条设计主张
 
 1. **核心保持简单**：`ImageFacade` 核心包 = 契约 + 路由 + 排版/Resize/Pipeline 等纯托管默认实现 + 内置字体；**不依赖任何编解码库，也不含 ImgProcSharp 源码**。
-2. **软后端单独成包**：`ImageFacade.Software` = 复制改造的 ImgProcSharp Core 源码 + `Sdcb.SimdCodecs 2.0` 编解码 + `ImageBackendBase`（只做加载/保存的抽象基类）+ `SoftwareBackend`（完整软渲染）。它是默认回退目标，也可独立使用。
+2. **软后端单独成包**：`ImageFacade.SdcbSimdCodecs` = 复制改造的 ImgProcSharp Core 源码 + `Sdcb.SimdCodecs 2.0` 编解码 + `ImageBackendBase`（只做加载/保存的抽象基类）+ `SoftwareBackend`（完整软渲染）。它是默认回退目标，也可独立使用。
 3. **后端是"能力可缺"的**：SPI 的每个绘制方法都是 `Try*`，返回 `false` 表示"我干不了"，而不是抛异常。引擎拿到 `false` 再决定回退。
 4. **回退 = 把像素交给软后端执行**：软后端也是 `IImageBackend`，回退就是"换个后端在同一份像素上画"（默认临时迁移，可选粘滞），不需要第二套渲染接口。
 5. **语义由门面定义，不由后端定义**：坐标系、Resize 模式、文字锚点、透明度合成、JPEG 背景色、**缺省像素格式 RGBA32**，全部在门面层写死并由一致性测试锁定。
@@ -82,7 +82,7 @@ ffmpeg / 相机 ──► 解码后的视频帧 ──► letterbox + 张量化 
 | 后端 | 支持版本 | 适合度 | 理由 |
 |---|---|---|---|
 | SkiaSharp | 4.155 / 3.119 | ★★★ 首选 | 绘制/文字/alpha 全原生，1080p 叠加目标个位数毫秒；跨平台；AOT 可用 |
-| `ImageFacade.Software` | Sdcb 2.0 | ★★ 兜底/AOT | 零原生依赖、输出确定；单帧全软渲染 15 ms 量级（目标），30 fps 够用；编码格式随 Sdcb 2.0 |
+| `ImageFacade.SdcbSimdCodecs` | Sdcb 2.0 | ★★ 兜底/AOT | 零原生依赖、输出确定；单帧全软渲染 15 ms 量级（目标），30 fps 够用；编码格式随 Sdcb 2.0 |
 | OpenCvSharp | 4.13 / 5.0 | ★★ 已有 OpenCV 生态时 | `Mat` 的 BGR 数据按 `PixelFormat.Bgr24` 直接进门面；但中文标签/半透明底会回退，适合"OpenCV 做前处理，Skia 做叠加" |
 | ImageSharp | 3.1 / 2.1 | ★ 服务端/批处理 | 纯托管、格式全；每帧处理分配较多，50/60 fps 不推荐 |
 
@@ -103,7 +103,8 @@ ffmpeg / 相机 ──► 解码后的视频帧 ──► letterbox + 张量化 
 │  · Rgba32 / PointF / RectF / SizeF / PixelFormat             │
 │  · LoadOptions / SaveOptions / ResizeOptions / TextStyle     │
 │  · 路由引擎：能力判断 → 原生 → 回退 → 抛错                     │
-│  · 排版 · Resize 六模式 · JPEG 背景合成 · 内置字体             │
+│  · 字体引擎：Font（TrueType 解析 + 字形光栅化 + 排版/测量）   │
+│  · 排版 · Resize 六模式 · JPEG 背景合成 · 内置字体资源         │
 │  · Pipeline：letterbox / 张量化 / NMS / 检测框 / 像素转换      │
 │  · 不依赖编解码库，不含软渲染源码                              │
 └───────┬───────────────────────┬─────────────────────────────┘
@@ -117,7 +118,7 @@ ffmpeg / 相机 ──► 解码后的视频帧 ──► letterbox + 张量化 
         └──────────┬────────┴──────────────────────┘
                    │ 可选的默认回退目标（引用后才注册）
         ┌──────────▼──────────────────────────────────┐
-        │ ImageFacade.Software（独立包）               │
+        │ ImageFacade.SdcbSimdCodecs（独立包）               │
         │  · ImageBackendBase：只做加载/保存的抽象层    │
         │  · SoftwareBackend：完整软渲染                │
         │  · Rendering/：复制改造的 ImgProcSharp Core   │
@@ -130,13 +131,16 @@ ffmpeg / 相机 ──► 解码后的视频帧 ──► letterbox + 张量化 
 ```
 ImageFacade
 ├─ Abstractions/     IImageBackend、IFrame、选项、几何、颜色（无三方依赖）
+├─ Font.cs / Font.Layout.cs   公共 Font：加载、度量、Measure、Layout（内部）
+├─ Text/Engine/      TrueTypeFont、GlyphRasterizer、GlyphMask、GlyphPath、PathCollection、TextLayout
+├─ Text/             TextStyle、FontRef、BuiltInFont（内置字体资源）
 ├─ Pipeline/         letterbox、张量化、NMS、检测绘制、像素转换
 └─ Internal/         Router、TextLayouter、ResizePlanner
 
-ImageFacade.Software
+ImageFacade.SdcbSimdCodecs
 ├─ ImageBackendBase   Decode/Encode/Clone/Copy（Sdcb 2.0），绘制默认 false
-├─ SoftwareBackend    : ImageBackendBase，补绘制/Resize/文字
-└─ Rendering/         复制并改造的 ImgProcSharp Core（全部 internal）
+├─ SoftwareBackend    : ImageBackendBase，补绘制/Resize/文字（用核心 Font）
+└─ Rendering/         复制并改造的 ImgProcSharp Core（全部 internal，不含字体引擎）
 ```
 
 ### 2.1 一次绘制的数据流
@@ -148,12 +152,17 @@ img.DrawLine(a, b, color, width)
   │     ├─ true  → 完成（原生，零拷贝）
   │     └─ false → 进入回退
   ├─ fallback = Options.FallbackBackend ?? SoftwareFallback.Factory?.Invoke()
-  │             // ImageFacade.Software 通过 ModuleInitializer 注册；没引用就没有回退
+  │             // ImageFacade.SdcbSimdCodecs 通过 ModuleInitializer 注册；没引用就没有回退
   ├─ PerOperation（默认）：
   │     using var temp = fallback.Import(img)      // 规范像素 → 软后端
   │     fallback.TryDrawLine(temp.Frame, spec)     // 软渲染（必定支持）
   │     img.ImportFrom(temp)                       // 写回原后端
   └─ SwitchAndStay：迁移一次，后续都留在软后端
+
+img.Mutate(x => x.DrawLine(...).DrawText(...))   // 批量作用域（BeginDraw 同理）
+  ├─ 第一次回退 → 整帧导出到软帧（一次）
+  ├─ 之后所有 op 都在软帧上按原顺序执行（顺序安全）
+  └─ 作用域结束 → 一次写回；SwitchAndStay / 达标的 Adaptive 直接接管软帧
 ```
 
 ### 2.2 能力 / 回退判定
@@ -176,6 +185,7 @@ img.DrawLine(a, b, color, width)
 - **Disabled**：不回退，缺能力直接抛错（严格模式/测试用）。
 - **显式切换**：`img.UseSoftware()` / `img.UseNative()`，不受 `FallbackMode` 影响。
 - **确定性**：`ImageEngineOptions.PreferSoftwareRendering = true` 时所有绘制都走软后端，所有后端输出一致（编解码仍由原后端负责）。
+- **批量作用域（`Mutate` / `BeginDraw`）**：作用域内**第一次**触发回退时把整帧导出到软帧一次，之后所有操作（包括原生后端本来能做的）都留在那个软帧上按原顺序执行，结束时只写回一次。画 N 个需要回退的元素时，全图往返从 N 次降到 1 次；`PreferSoftwareRendering = true` 的场景同样受益（否则每个 op 都要往返一次）。回退计数与 `OnFallback` 按"每段软帧"记一次，`SwitchAndStay` / 达到阈值的 `Adaptive` 直接接管软帧、省掉最后一次写回。作用域内抛出异常时丢弃软帧（不把半成品写回）。
 
 ---
 
@@ -220,6 +230,7 @@ public enum TextAlign { Left, Center, Right }
 public sealed class TextStyle
 {
     public FontRef Font { get; init; } = FontRef.BuiltIn;
+    public Font? FontFace { get; init; }           // 非空 = 直接用这个实例，跳过 FontRef 解析
     public float Size { get; init; } = 16f;
     public Rgba32 Color { get; init; } = Rgba32.Black;
     public float MaxWidth { get; init; }            // 0 = 不折行
@@ -232,9 +243,10 @@ public sealed class TextStyle
 
 - **折行与对齐在门面层做**，后端只画单行：换行符 `\n` 硬断行，`MaxWidth > 0` 时按字（CJK）或词（拉丁）贪心断行；对齐以 `MaxWidth`（为 0 时用最宽行）为参照。
 - 后端只需提供 **单行测量** `TryMeasureText`，门面用同一套测量结果排版，保证 `MeasureText` 与 `DrawText` 自洽。
-- 锚点转换：`TopLeft` 时 `baselineY = y + ascent`（Skia 的 ascent 是负数，取反；OpenCV/ImgProcSharp 的 `PutText`/`DrawText` 用基线，直接传；ImageSharp 的 `RichTextOptions` 用布局框左上角，直接传）。
-- 字体解析顺序：`FontRef.Data` → `FontRef.FilePath` → `FontRef.Family`（系统字体）→ `FontRef.BuiltIn`（内置文泉驿微米黑）。缺字时整段回退到内置字体（v1 不做逐字形回退，见 misc §J）。
-- 字体没有 kerning/整形（软后端）或由后端原生引擎负责（Skia/ImageSharp）。**跨后端文字外观必然不同**，需要一致时 `PreferSoftwareRendering = true`。
+- 锚点转换：`TopLeft` 时 `baselineY = y + ascent`（Skia 的 ascent 是负数，取反；OpenCV 5 自绘与 ImgProcSharp 的 `DrawText` 都用基线，直接传；ImageSharp 的 `RichTextOptions` 用布局框左上角，直接传）。
+- 字体解析顺序：`TextStyle.FontFace`（非空则直接用，不再解析）→ `FontRef.Data` → `FontRef.FilePath` → `FontRef.FamilyName`（系统字体，仅 Skia/ImageSharp）→ `FontRef.BuiltIn`（内置文泉驿微米黑）。托管文字后端没有系统字体管理器，给字体族时统一退回内置字体。缺字时整段回退到内置字体（v1 不做逐字形回退，见 misc §J）。
+- **字体引擎在核心包**（`ImageFacade` 自身，`net8.0` / `net10.0` 都有）：`Font` 是公共类型，`TrueTypeFont`/`GlyphRasterizer`/`GlyphMask`/`TextLayout` 等放在 `src/ImageFacade/Text/Engine/`（命名空间 `ImageFacade.Text.Engine`，对 `ImageFacade.SdcbSimdCodecs` 与 `ImageFacade.OpenCvSharp5` 用 `InternalsVisibleTo` 暴露）。托管文字后端拿 `Font.GetGlyphMask`/`Font.Layout` 自己混色，不依赖任何原生文字 API。
+- 字体没有 kerning/整形（软后端）或由后端原生引擎负责（Skia/ImageSharp）。**跨后端文字外观必然不同**，需要一致时 `PreferSoftwareRendering = true`。原生文字后端（Skia/ImageSharp）忽略 `FontFace`，只走 `FontRef`。
 
 ### 3.5 描边样式
 
@@ -392,6 +404,10 @@ public sealed class FacadeImage : IDisposable
     public FacadeImage DrawText(string text, PointF at, TextStyle style);
     public SizeF MeasureText(string text, TextStyle style);
 
+    // 批量绘制：作用域内回退只做一次整帧往返（plan §2.3）
+    public FacadeImage Mutate(Action<FacadeImage> draw, bool flushOnNative = false);
+    public DrawBatch BeginDraw(bool flushOnNative = false);
+
     // 生命周期 / 后端切换
     public FacadeImage Clone();
     public FacadeImage UseSoftware();
@@ -420,6 +436,21 @@ public Task<byte[]> EncodeAsync(SaveOptions? options = null, CancellationToken c
     public void Dispose();
 }
 ```
+
+批量作用域：
+
+```csharp
+public sealed class DrawBatch : IDisposable
+{
+    public FacadeImage Image { get; }       // 在这上面继续 Draw*
+    public void Flush();                    // 把软帧写回当前后端（作用域仍有效，后续可再次回退）
+    public void Dispose();                  // 结束作用域：最后一次写回
+}
+```
+
+- `Mutate` 是回调式（对齐 ImageSharp 的 `Mutate`），`BeginDraw` 是 `using` 式，适合 `foreach` 逐元素画——API 面只有两个方法，不复制 12 个 `Draw*` 转发。
+- `flushOnNative = true` 时每个操作开始前先写回软帧，让"原生能做的操作"切回原生；默认 `false` 表示一次回退后整段留在软帧（连续回退场景往返最少）。它适合"少量中文标签 + 大量原生绘制"，全回退场景请用默认值。
+- 作用域内的 `Resize` / `Clone` / `Save` / `Encode` / `GetPixel` / `CopyPixelsTo` / `AcquirePixels` / `UseSoftware` / `UseNative` 会先 flush（这些操作需要看到完整帧或会替换帧），之后作用域继续有效。
 
 ### 4.4 选项
 
@@ -450,20 +481,48 @@ public sealed class ResizeOptions
     public bool PreferExactSampler { get; init; }          // 映射不精确时改走软后端
 }
 
-public sealed class FontRef
+public sealed class FontRef : IEquatable<FontRef>
 {
-    public string? Family { get; }
+    public string? FamilyName { get; }                     // 系统字体族名（属性叫 -Name，避开与静态工厂同名）
     public string? FilePath { get; }
     public ReadOnlyMemory<byte>? Data { get; }
     public FontStyle Style { get; }
-    public bool UseBuiltInFallback { get; init; } = true;
+    public bool IsBuiltIn { get; }
 
     public static FontRef BuiltIn { get; }                 // 内嵌文泉驿微米黑
     public static FontRef Family(string name, FontStyle style = FontStyle.Regular);
     public static FontRef FromFile(string path, FontStyle style = FontStyle.Regular);
     public static FontRef FromData(ReadOnlyMemory<byte> data, FontStyle style = FontStyle.Regular);
 }
+
+// 解析后的字体实例：解析一次，反复复用（字形位图按 码点×字号 缓存，上限 4096）
+public sealed class Font
+{
+    public static Font BuiltIn { get; }                    // 全局单例，首次访问时解压 + 解析
+    public static Font Load(byte[] data);                  // TTF 字节
+    public static Font LoadFromFile(string path);          // .ttf 文件
+    public static Font LoadFromStream(Stream stream);
+
+    public string FamilyName { get; }
+    public int UnitsPerEm { get; }
+    public float GetAscent(float size);
+    public float GetDescent(float size);
+    public float GetLineHeight(float size);
+    public bool HasGlyph(int codePoint);
+    public float GetAdvance(int codePoint, float size);
+    public float Measure(string text, float size);         // 单行宽度（无 kerning）
+
+    // 内部字形 API：给托管文字后端（SdcbSimdCodecs / OpenCvSharp5）用，不走公开面
+    internal GlyphMask GetGlyphMask(int codePoint, float size);
+    internal GlyphPath GetGlyphPath(int codePoint, float size);
+    internal PathCollection GetGlyphPaths(int codePoint, float size);
+    internal TextLayout Layout(string text, float size, TextLayoutOptions options = default);
+    internal PathCollection GetTextPaths(string text, float size, TextLayoutOptions options = default);
+}
 ```
+
+- `FontRef` 仍是推荐入口（免手工管理生命周期）；需要自控实例或跨多次绘制复用同一门字体时，用 `Font.Load*` 拿实例塞进 `TextStyle.FontFace`。
+- `Font.BuiltIn` 是全局单例，解决方案里只解压/解析一次内置字体；自建 `Font` 实例由调用方持有，未释放（字体表是托管数组，GC 回收）。
 
 ### 4.5 典型用法
 
@@ -488,6 +547,30 @@ img.Resize(new ResizeOptions { Width = 800, Height = 600, Mode = ResizeMode.Max,
    });
 
 img.Save("out.png", new SaveOptions { CompressionLevel = 6 });
+```
+
+批量绘制（一帧画很多元素时，回退只做一次整帧往返）：
+
+```csharp
+using (var batch = img.BeginDraw())
+{
+    FacadeImage canvas = batch.Image;
+    foreach (Detection d in detections)
+    {
+        canvas.DrawRectangle(d.Box, Rgba32.Lime, 2f)
+              .FillRectangle(labelRect, Rgba32.FromHex(0x000000, a: 160))
+              .DrawText(d.Label, labelOrigin, labelStyle);
+    }
+}
+
+// 或者回调式
+img.Mutate(x =>
+{
+    foreach (Detection d in detections)
+    {
+        x.DrawRectangle(d.Box, Rgba32.Lime, 2f);
+    }
+});
 ```
 
 换后端只改两行：
@@ -798,9 +881,9 @@ public ref struct PixelLease
 
 `FromPixels(..., wrap: true)` 只有"规范 RGBA32 + 后端支持 `TryWrapPixels`"时才真正零拷贝；BGR24/BGRA 等格式由核心先做一次转换再导入，此时 `IsZeroCopy == false`，不报错也不假装零拷贝。
 
-### 5.2 抽象基类：只做加载/保存（在 ImageFacade.Software 里）
+### 5.2 抽象基类：只做加载/保存（在 ImageFacade.SdcbSimdCodecs 里）
 
-`ImageBackendBase` 放在 **`ImageFacade.Software`** 包，不污染核心。这就是"Software 只做加载/保存"的落点：**抽象层**是 `ImageBackendBase`（解码/编码/克隆/拷像素），**具体层**是 `SoftwareBackend : ImageBackendBase`（再加 ImgProcSharp 渲染）。
+`ImageBackendBase` 放在 **`ImageFacade.SdcbSimdCodecs`** 包，不污染核心。这就是"Software 只做加载/保存"的落点：**抽象层**是 `ImageBackendBase`（解码/编码/克隆/拷像素），**具体层**是 `SoftwareBackend : ImageBackendBase`（再加 ImgProcSharp 渲染）。
 
 它依赖 `Sdcb.SimdCodecs 2.0`，所以只能待在 Software 包里；核心要保持零编解码依赖。
 
@@ -883,13 +966,13 @@ T Execute<T>(FacadeImage img, BackendOperation op, string feature, Func<IImageBa
 ### 5.5 注册软后端与所有权
 
 ```csharp
-// ImageFacade.Software 里的模块初始化器
+// ImageFacade.SdcbSimdCodecs 里的模块初始化器
 [ModuleInitializer]
 internal static void Register() => SoftwareFallback.Register(() => new SoftwareBackend());
 ```
 
 - `ImageEngine` 构造时**不**创建软后端；第一次需要回退时通过注册的工厂懒创建 `SoftwareBackend`，`Dispose` 时释放。
-- 没有引用 `ImageFacade.Software` 就没有回退；`FeatureNotSupportedException` 的消息里明确提示"添加 `ImageFacade.Software` 或显式设置 `FallbackBackend`"。
+- 没有引用 `ImageFacade.SdcbSimdCodecs` 就没有回退；`FeatureNotSupportedException` 的消息里明确提示"添加 `ImageFacade.SdcbSimdCodecs` 或显式设置 `FallbackBackend`"。
 - `ImageEngineOptions.FallbackBackend` 显式指定时优先用调用方的实例，且**不由引擎释放**。
 - 主后端就是 `SoftwareBackend` 时，不再创建第二个实例，回退目标就是它自己（`Try*` 全支持，不会回退）。
 - 后端实现无状态（字体缓存除外，用 `ConcurrentDictionary`）；`ImageEngine` 可跨线程共享，`FacadeImage` 不可。
@@ -937,7 +1020,7 @@ public readonly struct DecodedImage
 
 ### 6.1 SoftwareBackend（独立包：回退基准 + 可独立使用）
 
-依赖：**ImgProcSharp Core 源码复制进 `ImageFacade.Software`**（Apache-2.0，锁定 0.1.0 快照）+ `Sdcb.SimdCodecs` **2.0.0**（NuGet）。核心包不含这些。
+依赖：**ImgProcSharp Core 源码复制进 `ImageFacade.SdcbSimdCodecs`**（Apache-2.0，锁定 0.1.0 快照）+ `Sdcb.SimdCodecs` **2.0.0**（NuGet）。核心包不含这些。
 
 | 能力 | 实现 |
 |---|---|
@@ -946,13 +1029,13 @@ public readonly struct DecodedImage
 | 编码 | `Canvas.CopyToStraight` → `ImageBackendBase.Encode`：`SimdCodecs.Encode(pixels, w, h, PixelFormat.Rgba32, format, stride, options)`（PNG/JPEG/TIFF/WebP/GIF/BMP/ICO/QOI/PNM） |
 | Resize | `Canvas.Resize(...)`（六模式都有，但门面只调它的 Stretch） |
 | 画点/线/形状 | `DrawingContext.Fill/Draw` + `CirclePolygon`/`RectangularPolygon`/`Polygon`/`PathBuilder` |
-| 文字 | `TextFont.Load(核心内置字体字节)` + `TextDrawing.DrawText`（基线锚点） |
+| 文字 | 核心 `Font`（`Font.BuiltIn`，或 `TextStyle.FontFace` 传进来的实例）+ 复制的 `DrawingContext.DrawText`（基线锚点），字形光栅化由核心 `Font.GetGlyphMask` 提供 |
 | 像素 | `CopyToStraight` / 自己的 premultiply 循环导入；`TryWrapPixels` 返回 `false`（`Canvas` 只接受 `byte[]`） |
 
 要点：
 
 - 复制范围：ImgProcSharp 的 **Core 工程**（`Canvas`/`Drawing`/`Text`/`Rasterization`/`Resampling`/`Paths`/`Primitives`/`Brushes`/`Pens`/`Colors`）；**不复制**它的字体资源、`ImgProcSharp.SimdCodecs` 门面与 `Image` 类型（解码/编码由 `ImageBackendBase` 统一做）。
-- 改造：命名空间改为 `ImageFacade.Software.Rendering`，全部类型 `internal`；删除它自己的 csproj/打包属性/内嵌字体资源；字体从核心的公开 `BuiltInFont.Data` 取，整个解决方案只有一份字体资源。
+- 改造：命名空间改为 `ImageFacade.SdcbSimdCodecs.Rendering`，全部类型 `internal`；删除它自己的 csproj/打包属性/内嵌字体资源。**字体解析与字形光栅化已上移到核心包**（`Font` + `ImageFacade.Text.Engine`），本包只保留画布与绘制语义，整个解决方案只有一份内置字体资源。
 - ImgProcSharp 的 `Canvas` 是预乘，规范像素是直通，**边界各一次转换**；导出用 `CopyToStraight`（内部不透明时走 memcpy）。
 - 软后端是**所有其他后端的回退目标**，因此它必须覆盖 v1 的全部能力位。
 - 视频场景下软后端的优势是"无原生依赖 + AOT"，劣势是 `Canvas` 是托管数组、每帧进 LOH；帧池（misc §S.6）优先在软后端落地。
@@ -981,7 +1064,11 @@ public readonly struct DecodedImage
 - `SKCanvas` 的 `Save/Restore` 用于隔离每次绘制设置的 `SKPaint` 状态。
 - 无原生库（Linux 缺 libfontconfig 等）时，构造 `SkiaBackend` 即抛 `ImageBackendException`，消息带安装提示。
 - **视频叠加的首选后端**：绘制/文字/alpha 都是原生，1080p 画 100 个框 + 标签在个位数毫秒；`FromPixels` 用 `Bgr24` 时核心做一次通道重排，之后全在原生位图上画。
-- 3.x 与 4.x 的差异集中在 `SKBitmap.Resize` 的重载、`SKSamplingOptions`/`SKCubicResampler` 的构造与少数已废弃 API；用 `#if SKIA3` 隔离，API 主体不复制两遍。
+- 3.x 与 4.x 的差异（**M3 实测**）集中在三处，用 `#if SKIA3` / `#if SKIA4` 隔离，主体不复制两遍：
+  1. `SKPathBuilder`（4.x 有、3.119 没有）——4.x 里 `SKPath.MoveTo/LineTo/Close` 已被标记过时；
+  2. `SKCanvas.DrawBitmap(bitmap, x, y, SKSamplingOptions, paint)`（4.x 新重载替换 4 参版本）；
+  3. 其余的 `SKSamplingOptions` / `SKFont` / `SKTypeface.FromData` / `SKImage.Encode` 在 3.119 与 4.155 上一致。
+- 适配包不引 `SkiaSharp.NativeAssets.*`：原生库由应用按 RID 引（示例与测试各引一份 win-x64）。
 
 ### 6.3 ImageSharpBackend
 
@@ -995,67 +1082,67 @@ public readonly struct DecodedImage
 | 解码 | `Image.Load<Rgba32>(data)`；`AutoOrient()` 处理器；`Image.DetectFormat` 取格式 |
 | 编码 | `Save(stream, new PngEncoder{CompressionLevel=...})` / `JpegEncoder{Quality}` / `WebpEncoder` |
 | Resize | `Mutate(x => x.Resize(new ResizeOptions{ Size, Mode, Sampler }))`（门面只调 Stretch） |
-| 绘制 | `Mutate(x => x.Paint(canvas => canvas.DrawLine(pen, a, b)))`；形状统一走 `PathBuilder` 以避免依赖 `DrawingCanvas` 的重载细节 |
-| 文字 | `SixLabors.Fonts`：`SystemFonts.CreateFont` / `FontCollection.Add(流)`；`RichTextOptions` + `canvas.DrawText` |
+| 绘制 | `Mutate(ctx => ctx.Fill(color, path))` / `ctx.Draw(drawingOptions, pen, path)` / `ctx.DrawLine(drawingOptions, pen, points)`；形状用 `RectangularPolygon`/`EllipsePolygon`/`Polygon`/`PathBuilder` |
+| 文字 | `SixLabors.Fonts`：`SystemFonts.TryGet` / `new FontCollection().Add(流)`；`RichTextOptions` + `ctx.DrawText(drawingOptions, options, text, brush, pen: null)` |
 | 像素 | `DangerousTryGetSinglePixelMemory`（失败则整图复制） |
 
 要点：
 
-- `ImageSharp.Drawing` 3.x 的绘制入口是 `Paint(canvas => ...)`，具体重载在 M5 逐个核对；不确定的统一用 `PathBuilder` + `Draw/Fill`。
+- `ImageSharp.Drawing` 2.1.3 / 1.0.0 的绘制入口都是 `Mutate` + `Fill`/`Draw`/`DrawLine` 扩展（没有 `Paint`/`DrawingCanvas`）；参数顺序是"options 在前、颜色居中、路径最后"。
 - 没有 `SystemFonts` 的环境（容器）必须自备字体；门面默认用内置字体，所以不需要系统字体也能跑。
 - **许可证**：ImageSharp 2.0+ 是 Six Labors Split License，不是 Apache-2.0。本仓库只做 `PackageReference`，不打包、不转发源码；README 显著提示使用方自行确认授权。
 - 定位：纯托管、格式全，适合服务端批处理；`Mutate` 每帧分配较多，高频视频叠加不如 Skia，但可以作为无 native 依赖的替代。
-- **2.x 适配差异**：常规 API 基本一致（`Image.Load<Rgba32>`、`Mutate`、`Resize`、`AutoOrient`），但 Drawing 1.x 的文字是 `ctx.DrawText(TextGraphicsOptions, ...)`（不是 3.x 的 `DrawingCanvas`/`RichTextOptions`），像素访问是 `TryGetSinglePixelSpan`（不是 `DangerousTryGetSinglePixelMemory`）。这两块用 `#if IMAGESHARP2` 单独实现，其余共享。
+- **2.x 适配差异（M5 实测）**：比预期小得多。Drawing 1.0.0 与 2.1.3 的目标 API **完全一致**——文字都是 `RichTextOptions` + `DrawText(DrawingOptions, RichTextOptions, text, Brush, Pen)`（旧的 `TextGraphicsOptions` 那套在 1.0 已经没了），形状都是 `Fill/Draw(DrawingOptions?, …)`，`Pen`/`PenOptions`/`PathBuilder`/`RectangularPolygon`/`EllipsePolygon` 也都一样；像素访问两边都有 `DangerousTryGetSinglePixelMemory` 与 `CopyPixelDataTo`。**唯一**的 `#if IMAGESHARP2` 在 EXIF 读取：2.x 是 `ExifProfile.GetValue(ExifTag.Orientation)`，3.x 是 `TryGetValue`。其余一份源码，两个包各编一遍。
 
 ### 6.4 OpenCvBackend
 
-依赖：`OpenCvSharp4` **4.13.0.20261107**（`ImageFacade.OpenCvSharp`）与 `OpenCvSharp5` **5.0.0.20261109**（`ImageFacade.OpenCvSharp5`），各自配对应的 runtime 包；共享源码 + `#if OPENCV5`（见 §6.5）。
+依赖：`OpenCvSharp4` **4.13.0.20261107**（`ImageFacade.OpenCvSharp`）与 `OpenCvSharp5` **5.0.0.20261109**（`ImageFacade.OpenCvSharp5`），各自配对应的 runtime 包；共享源码一份（见 §6.5）。文字能力**不需要跨工程引用**：核心包自带 `Font` / `Font.Layout`，两个工程都只 `ProjectReference` 核心，用 `DefineConstants` 的 `OPENCV4` / `OPENCV5` 区分是否编译文字分支（核心的多目标与后端 TFM 无关）。
 
 | 能力 | 实现 |
 |---|---|
 | 帧 | `Mat`（`CV_8UC4`，BGRA，直通） |
-| 解码 | `Cv2.ImDecode(bytes, ImreadModes.Unchanged | ImreadModes.IgnoreOrientation)` → 3 通道转 BGRA；方向用 `SimdCodecs.TryReadInfo` 读，再 `Cv2.Rotate/Flip` 自己转 |
+| 解码 | `Cv2.ImDecode(bytes, ImreadModes.Unchanged[| IgnoreOrientation])` → 1/2/3 通道统一转 BGRA；`AutoOrient = true` 靠 OpenCV 自己按 EXIF 转正（`Orientation` 报 0） |
 | 编码 | `Cv2.ImEncode(".png"/".jpg"/".webp", mat, out byte[], new ImageEncodingParam(ImwriteFlags.JpegQuality, q))` |
 | Resize | `Cv2.Resize(mat, dst, new Size(w, h), 0, 0, InterpolationFlags)` |
 | 绘制 | `Cv2.Line/Circle/Rectangle/Ellipse/Polylines/FillPoly`，`LineTypes.AntiAlias` |
-| 文字 | 默认**不使用** `Cv2.PutText`（Hershey 字体、仅 ASCII、外观与常规文字差别大）→ 直接返回 `false` 走软后端。`OpenCvBackendOptions.NativeAsciiText = true` 时才启用 |
-| 像素 | `mat.Data` + `Step()` 逐行拷贝；BGRA ↔ RGBA 通道交换 |
+| 文字 | **不用 `Cv2.PutText`**（Hershey 只有 ASCII、外观差得远）：`OPENCV5` 编译时复用核心 `Font.Layout`（嵌入字体 + 自己解析 TrueType），拿 A8 字形覆盖位图按覆盖率混进 BGRA 的 `Mat`——中文与半透明文字都能画，不必回退。`OPENCV4` 编译时字体模块在 contrib 扩展包里、缺省视为没有，`DrawText`/`MeasureText` 返回 `false` 走回退 |
+| 像素 | `mat.Data` + `Step()` 逐行拷贝；BGRA ↔ RGBA 通道交换；`TryWrapPixels` 恒 `false`（通道顺序对不上，不算零拷贝） |
 
 要点：
 
-- **不做 alpha 混合**：`color.A < 255` 直接 `false`。这是 OpenCV 作为"绘制后端"最大的短板，也是回退机制存在的首要理由。
-- 坐标量化：门面 corner 坐标 → `x - 0.5` → `Round`；能用 `shift` 时优先保留 1/16 精度（M6 验证）。
-- `imdecode` 是否自动应用 EXIF 方向需要在 M6 用带方向的 JPEG 实测，并把结论写进 misc §G；解码时显式带 `IgnoreOrientation` 以避免双重旋转。
+- **形状不做 alpha 混合**：`color.A < 255` 的 `Fill/Draw/Line` 直接 `false`。这是 OpenCV 作为"绘制后端"最大的短板，也是回退机制存在的首要理由。
+- **文字是个例外**（M6 追加）：`OPENCV5` 下文字由核心的托管字形光栅化直接写 `Mat`，混合在直通空间自己做，所以 `color.A < 255` 的文字能正常半透明合成，不必回退；`TextStyle.FontFace` 非空时直接用调用方实例，不再解析 `FontRef`。依赖方向只有 `ImageFacade.OpenCvSharp(5)` → 核心 `ImageFacade`（`InternalsVisibleTo` 暴露 `Font.Layout`），不再有指向 `ImageFacade.SdcbSimdCodecs` 的工程依赖（软后端仍是运行时回退目标，由用户自己组合）。
+- 坐标量化（M6 落地）：门面 corner 坐标 → `x - 0.5` → `Round`，精度 ±0.5 px。`shift` 的 1/16 精度**没有启用**——它对所有绘制函数都要改，收益不明显，留作后续优化。
+- EXIF 方向（M6 落地）：`AutoOrient = true` 用 `ImreadModes.Unchanged` 交给 OpenCV 转正，`false` 显式加 `IgnoreOrientation`。代价是 `ImageMetadata.Orientation` 只能报 0；M8 用固定样本回归（结论记在 misc §G.4）。
 - 原生依赖必须按 RID 部署（`OpenCvSharp4.runtime.win` / `.runtime.ubuntu.22.04-x64` 等），不支持 NativeAOT。
 - `Mat` 不是线程安全的共享对象；每个 `FacadeImage` 独占一个 `Mat`。
 - **视频场景的定位**：如果采集/AI 前处理已经全在 OpenCV（`Mat` BGR），用它能省一次通道转换（`FromPixels(..., PixelFormat.Bgr24)`）；但叠加中文标签/半透明底会触发回退，整帧画很多标签时把 `Fallback` 设为 `Adaptive`，或直接用软后端/ Skia 负责绘制、OpenCV 只做前处理。
-- **4.x vs 5.x**：`Mat`/`Cv2` 主体不变，差异在 OpenCV 5 的枚举/常量（部分旧 flag 被移除或改名）与 `ImEncode`/`ImDecode` 的可用格式。用 `#if OPENCV4` / `#if OPENCV5` 隔离常量与少量重载，M6 用实际包逐个编译核对。
+- **4.x vs 5.x（M6 实测）**：绘制/编解码用到的枚举/常量与 `Mat`/`Cv2` 主体两代一致（5.0 只是多了可选参数、`Merge` 换成 `ReadOnlySpan` 重载），`OpenCvBackend` 一份源码两个工程各编一遍；文字是唯一的能力分叉，用 `DefineConstants` 的 `OPENCV4` / `OPENCV5` 隔开（**不按 TFM 区分**）。真正要小心的是 OpenCvSharp 自带的 `OCVS002` 分析器：循环条件里碰 `Mat.Rows`/`Cols` 直接编译报错。
 
 ### 6.5 多主版本适配（SkiaSharp 3/4、OpenCvSharp 4/5、ImageSharp 2/3）
 
 **为什么必须是多个包**：一个 .NET 程序集只能绑定一个 `SkiaSharp` / `OpenCvSharp` / `ImageSharp` 版本，`Assembly.Load` 不接受"3 或 4 都行"；绑定重定向不跨平台、也不解决 API 差异。因此每个主版本一个适配包，共享源码消除重复实现。
 
 ```
-src/adapters/SkiaShared/*.cs                 # 共享实现（90%+ 代码）
-src/ImageFacade.SkiaSharp/                   # SkiaSharp 4.155.0，DefineConstants=SKIA4
-src/ImageFacade.SkiaSharp3/                  # SkiaSharp 3.119.1，DefineConstants=SKIA3
-src/adapters/OpenCvShared/*.cs
-src/ImageFacade.OpenCvSharp/                 # OpenCvSharp4 4.13，OPENCV4
-src/ImageFacade.OpenCvSharp5/                # OpenCvSharp5 5.0，OPENCV5
-src/adapters/ImageSharpShared/*.cs
-src/ImageFacade.ImageSharp/                  # ImageSharp 3.1 + Drawing 3.1，IMAGESHARP3
-src/ImageFacade.ImageSharp2/                 # ImageSharp 2.1 + Drawing 1.0，IMAGESHARP2
+src/ImageFacade.SkiaSharp/SkiaBackend.cs        # 源码只有一份，放在"当前主版本"工程里（SKIA4）
+src/ImageFacade.SkiaSharp3/                     # SkiaSharp 3.119.1（SKIA3），链接上面那份源码
+src/ImageFacade.OpenCvSharp/OpenCvBackend.cs    # OpenCvSharp4 4.13（OPENCV4）
+src/ImageFacade.OpenCvSharp5/                   # OpenCvSharp5 5.0（OPENCV5），链接上面那份
+src/ImageFacade.ImageSharp/ImageSharpBackend.cs # ImageSharp 3.1.12 + Drawing 2.1.3（IMAGESHARP3）
+src/ImageFacade.ImageSharp2/                    # ImageSharp 2.1.13 + Drawing 1.0.0（IMAGESHARP2），链接上面那份
 ```
+
+唯一"单独放"的第三方源码是 `ImageFacade.SdcbSimdCodecs/Rendering/`（复制改造的 ImgProcSharp Core）；适配层的代码一律待在自己后端的工程目录里，不另设 `src/adapters/`。
 
 做法：
 
-- 共享源码目录**不是工程**，只放 `.cs`；每个适配 csproj 用
-  `<Compile Include="..\adapters\SkiaShared\**\*.cs" Exclude="...\bin\**;...\obj\**" Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />` 编进自己的程序集。绝不写 `ProjectReference` 到共享目录（那会变成引用 dll）。
+- 源码只有一份，放在**当前主版本**的适配工程里；老/新主版本的 csproj 用
+  `<Compile Include="..\ImageFacade.SkiaSharp\**\*.cs" Exclude="..\ImageFacade.SkiaSharp\bin\**;..\ImageFacade.SkiaSharp\obj\**" Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />` 链接编译（绝不能漏掉 `bin`/`obj`，否则会把生成的 `AssemblyInfo` 编两遍）。绝不写 `ProjectReference` 到另一个适配工程（那会变成引用 dll）。
 - 差异只允许出现在 `ApiCompat.*.cs` 这样的 partial 文件里（或用 `#if SKIA3` 包住几行），主体逻辑只有一份。每次升级主版本先编译，把报错点收敛进 shim。
 - 已知差异点：
   - Skia：`SKBitmap.Resize` 重载、`SKSamplingOptions`/`SKCubicResampler` 构造、`SKCodec`/`SKImage.Encode` 的选项类型。
   - OpenCV：`ImreadModes`/`InterpolationFlags`/`ImwriteFlags` 常量、`ImEncode` 支持格式、`Mat` 与 `MatType` 命名。
-  - ImageSharp：Drawing 1.x 的 `DrawText(TextGraphicsOptions, ...)` vs 3.x 的 `DrawingCanvas.DrawText(RichTextOptions, ...)`；像素访问 `TryGetSinglePixelSpan` vs `DangerousTryGetSinglePixelMemory`；Fonts 版本不同。
+  - ImageSharp：Drawing 1.0.0 与 2.1.3 的绘制/文字 API 一致（M5 实测）；差异只有 `ExifProfile.GetValue`（2.x）vs `TryGetValue`（3.x），以及 Fonts 1.0 vs 2.0 的版本号。
 - `ImageFacade.ImageSharp2` 的文字/像素两块允许**分叉实现**（不强行 `#if` 挤在一个方法里），其余（加载/保存/Resize/绘制路径）共享。
 - 包命名：无后缀 = 当前主版本（SkiaSharp 4、OpenCvSharp 4、ImageSharp 3）；带数字 = 指定主版本（`SkiaSharp3`、`OpenCvSharp5`、`ImageSharp2`）。八个包同版本号发布，README 给一张"包 ↔ 三方库版本"对照表。
 - **CPM 冲突**：`ManagePackageVersionsCentrally` 默认一个包只能有一个版本。核心与"当前版本"适配包用中央版本；老/新主版本适配 csproj 用 `<PackageReference Include="SkiaSharp" VersionOverride="3.119.1" />`（或该工程单独 `ManagePackageVersionsCentrally=false`），不要试图在 `Directory.Packages.props` 里写两个同名条目。
@@ -1087,39 +1174,35 @@ f:/code/ImageFacade/
       Abstractions/{Rgba32,PointF,Size,SizeF,RectF,PixelFormat,ImageFormat}.cs
       Backends/{IImageBackend,IFrame,BackendCapabilities,PixelLease,*Spec}.cs
       Drawing/{StrokeStyle,LineCap,LineJoin}.cs
-      Text/{TextStyle,FontRef,TextAnchor,TextAlign,TextLayout}.cs
+      Text/{TextStyle,FontRef,BuiltInFont}.cs
+      Text/Engine/{TrueTypeFont,TrueTypeFont.Glyphs,GlyphOutline,GlyphRasterizer,GlyphMask,GlyphPath,PathCollection,TextLayout}.cs
       Options/{LoadOptions,SaveOptions,ResizeOptions,ResizeMode,Sampler}.cs
       Pixels/PixelConverter.cs
       Pipeline/{Letterbox,Nms,Tensorizer,TensorBuffer,Detection,DetectionStyle,DetectionDrawing}.cs
-      FacadeImage.cs  ImageEngine.cs  ImageEngineOptions.cs
+      FacadeImage.cs  DrawBatch.cs  ImageEngine.cs  ImageEngineOptions.cs  Font.cs  Font.Layout.cs
       Internal/{Router,PixelBridge,ResizePlanner,TextLayouter,SoftwareFallback}.cs
       Fonts/WenQuanYiMicroHei.ttf.gz
-    ImageFacade.Software/          # 独立包：Sdcb 2.0 + 复制改造的 ImgProcSharp Core
+    ImageFacade.SdcbSimdCodecs/          # 独立包：Sdcb 2.0 + 复制改造的 ImgProcSharp Core
       Defaults/ImageBackendBase.cs        # 只有加载/保存的抽象实现
       SoftwareBackend.cs                  # 继承 Base + 渲染
       Rendering/**                        # 复制并改造的 ImgProcSharp Core（internal）
-      ImageFacade.Software.csproj
-  src/adapters/
-    SkiaShared/*.cs                # Skia 适配共享源码
-    OpenCvShared/*.cs
-    ImageSharpShared/*.cs
+      ImageFacade.SdcbSimdCodecs.csproj
   src/
-    ImageFacade.SkiaSharp/         # SkiaSharp 4.155.0（当前）
-    ImageFacade.SkiaSharp3/        # SkiaSharp 3.119.1
-    ImageFacade.OpenCvSharp/       # OpenCvSharp4 4.13（当前）
-    ImageFacade.OpenCvSharp5/      # OpenCvSharp5 5.0
-    ImageFacade.ImageSharp/        # ImageSharp 3.1 + Drawing 3.1（当前）
-    ImageFacade.ImageSharp2/       # ImageSharp 2.1 + Drawing 1.0
+    ImageFacade.SkiaSharp/         # SkiaSharp 4.155.0（当前）+ SkiaBackend.cs
+    ImageFacade.SkiaSharp3/        # SkiaSharp 3.119.1，链接 SkiaSharp 工程的源码
+    ImageFacade.OpenCvSharp/       # OpenCvSharp4 4.13（当前）+ OpenCvBackend.cs
+    ImageFacade.OpenCvSharp5/      # OpenCvSharp5 5.0，链接 OpenCvSharp 工程的源码
+    ImageFacade.ImageSharp/        # ImageSharp 3.1.12 + Drawing 2.1.3（当前）+ ImageSharpBackend.cs
+    ImageFacade.ImageSharp2/       # ImageSharp 2.1.13 + Drawing 1.0.0，链接 ImageSharp 工程的源码
   tests/
-    ImageFacade.Tests/             # 路由/回退/排版/Resize/NMS/letterbox（FakeBackend）
-    Conformance.Shared/*.cs         # 一致性测试源码（被各测试工程 Link）
-    ImageFacade.Conformance.Software.Tests/
+    ImageFacade.Tests/             # 路由/回退/排版/Resize/NMS/letterbox（FakeBackend + Software + Skia4）
+    ImageFacade.ImageSharp3.Tests/ # ImageSharp 3.x 后端 + 与软后端的一致性（源码在这里）
+    ImageFacade.ImageSharp2.Tests/ # ImageSharp 2.x，链接上面那份测试源码
+    ImageFacade.Conformance.Software.Tests/   # 后续里程碑：全量一致性套件
     ImageFacade.Conformance.Skia4.Tests/
     ImageFacade.Conformance.Skia3.Tests/
     ImageFacade.Conformance.OpenCv4.Tests/
     ImageFacade.Conformance.OpenCv5.Tests/
-    ImageFacade.Conformance.ImageSharp3.Tests/
-    ImageFacade.Conformance.ImageSharp2.Tests/
   samples/
     ImageFacade.Samples/           # 当前版本四后端对比 + BGR24 帧 → 检测 → Bgra32 流水线
   benchmarks/
@@ -1130,7 +1213,7 @@ f:/code/ImageFacade/
 
 ```xml
 <PropertyGroup>
-  <TargetFrameworks>net8.0;net10.0</TargetFrameworks>   <!-- ImageFacade.Software 例外：见下 -->
+  <TargetFrameworks>net8.0;net10.0</TargetFrameworks>   <!-- ImageFacade.SdcbSimdCodecs 例外：见下 -->
   <LangVersion>12.0</LangVersion>
   <Nullable>enable</Nullable>
   <ImplicitUsings>enable</ImplicitUsings>
@@ -1141,11 +1224,11 @@ f:/code/ImageFacade/
 </PropertyGroup>
 ```
 
-- **目标框架**：只支持 `net8.0` 与 `net10.0`，不提供 `net9.0`；且"目标库支持才保留 net8"——`Sdcb.SimdCodecs 2.0.0` 只有 `net10.0` 资产，因此 **`ImageFacade.Software` 单目标 `net10.0`**，核心与六个适配包仍是双目标。
-- 包 ID（8 个）：`ImageFacade`、`ImageFacade.Software`、`ImageFacade.SkiaSharp`、`ImageFacade.SkiaSharp3`、`ImageFacade.OpenCvSharp`、`ImageFacade.OpenCvSharp5`、`ImageFacade.ImageSharp`、`ImageFacade.ImageSharp2`。
+- **目标框架**：只支持 `net8.0` 与 `net10.0`，不提供 `net9.0`；且"目标库支持才保留 net8"——`Sdcb.SimdCodecs 2.0.0` 只有 `net10.0` 资产，因此 **`ImageFacade.SdcbSimdCodecs` 单目标 `net10.0`**，核心与六个适配包仍是双目标。
+- 包 ID（8 个）：`ImageFacade`、`ImageFacade.SdcbSimdCodecs`、`ImageFacade.SkiaSharp`、`ImageFacade.SkiaSharp3`、`ImageFacade.OpenCvSharp`、`ImageFacade.OpenCvSharp5`、`ImageFacade.ImageSharp`、`ImageFacade.ImageSharp2`。
 - 版本从 `0.1.0` 起；核心包、Software 与所有适配包同版本号，`Directory.Build.props` 里统一 `VersionPrefix`。
 - `ImageFacade` 核心：只依赖 BCL + 内置字体，不含任何编解码库或渲染源码。
-- `ImageFacade.Software`：依赖核心 + `Sdcb.SimdCodecs` 2.0.0，内含复制改造的 ImgProcSharp Core。
+- `ImageFacade.SdcbSimdCodecs`：依赖核心 + `Sdcb.SimdCodecs` 2.0.0，内含复制改造的 ImgProcSharp Core。
 - 六个适配包：只引用核心包，并各自引用对应版本的三方库；适配包之间互不引用。
 - 内置字体通过 `EmbeddedResource` + `LogicalName` 进核心包；ImgProcSharp 与文泉驿的许可证/NOTICE 放 `licenses/` 与 `THIRD-PARTY-NOTICES.txt`。
 
@@ -1159,7 +1242,7 @@ f:/code/ImageFacade/
 |---|---|---|---|
 | M0 | 骨架 | 仓库结构、props、8 个 csproj（核心 + Software + 6 适配）、共享源码链接、slnx、`dotnet build` 双目标通过；空后端 + `Hello` 用例 | 0.5d |
 | M1 | 契约与引擎 | `Rgba32`/几何/格式/选项/`PixelFormat`；`IImageBackend`/`IFrame`；`ImageEngine`/`FacadeImage`；路由与四种回退模式（`FakeBackend` 验证）；`ResizePlanner`；`TextLayouter`；`PixelConverter`；单测 | 3.5d |
-| M2 | Software 独立包 | 新建 `ImageFacade.Software`；复制 ImgProcSharp Core 源码、命名空间/可见性/字体改造；`ImageBackendBase`（Sdcb 2.0 解码/编码）；`SoftwareBackend : ImageBackendBase` 全能力；EXIF 方向；`ModuleInitializer` 注册回退；端到端测试 | 3.5d |
+| M2 | Software 独立包 | 新建 `ImageFacade.SdcbSimdCodecs`；复制 ImgProcSharp Core 源码、改命名空间/可见性、删除内嵌字体资源（字体引擎在核心 `Font`）；`ImageBackendBase`（Sdcb 2.0 解码/编码）；`SoftwareBackend : ImageBackendBase` 全能力；EXIF 方向；`ModuleInitializer` 注册回退；端到端测试 | 3.5d |
 | M3 | Skia 3/4 适配 | 共享源码 + `SKIA3` shim；SkiaSharp 4.155 与 3.119 各编一遍；像素边界转换；原生字体 + 内置字体；错误信息 | 3.5d |
 | M4 | 一致性套件 | 共享测试源码 + 每版本一个测试工程；容差与 skip 规则；`OnFallback` 断言 | 1.5d |
 | M5 | ImageSharp 3/2 适配 | 3.1 + Drawing 3.1 与 2.1 + Drawing 1.0；Drawing 1.x 文字/像素分叉实现；字体集合；许可证提示 | 3d |
@@ -1180,10 +1263,10 @@ f:/code/ImageFacade/
 
 ### 功能
 
-- 同一份示例代码（只替换 `new XxxBackend()`）在 `ImageFacade.Software` + 当前版本三后端上各生成一张同尺寸 PNG（示例为 800×450）；主要几何元素（线、点、矩形、文字墨迹）包围盒偏差 ≤ 1 px。
+- 同一份示例代码（只替换 `new XxxBackend()`）在 `ImageFacade.SdcbSimdCodecs` + 当前版本三后端上各生成一张同尺寸 PNG（示例为 800×450）；主要几何元素（线、点、矩形、文字墨迹）包围盒偏差 ≤ 1 px。
 - 六个适配包（Skia3/4、OpenCV4/5、ImageSharp2/3）各自的一致性测试在 win-x64 全绿；旧版本包与当前版本包的公共 API 完全一致（用 `PublicAPI` 清单比对）。
 - `Load → Resize → DrawLine → DrawPoint → DrawText → Save` 全链路在七个后端上无异常。
-- OpenCV 画中文、画半透明线：自动回退到 `ImageFacade.Software`，`OnFallback` 能观察到；`Fallback = Disabled` 时抛 `FeatureNotSupportedException` 且消息可读。
+- OpenCV 画中文、画半透明线：自动回退到 `ImageFacade.SdcbSimdCodecs`，`OnFallback` 能观察到；`Fallback = Disabled` 时抛 `FeatureNotSupportedException` 且消息可读。
 - Skia/ImageSharp 在没有系统字体的容器里，用 `FontRef.BuiltIn` 能画出中文（内置字体生效）。
 - JPEG 保存一张带透明像素的图：透明处为 `BackgroundColor`（默认白），不是黑色。
 - `MeasureText` 返回的尺寸与 `DrawText` 实际墨迹包围盒偏差 ≤ 2 px（同一后端）。
@@ -1213,10 +1296,10 @@ f:/code/ImageFacade/
 ### 工程
 
 - `dotnet build` 双目标 0 warning；核心包 `dotnet pack` 里没有 SkiaSharp/OpenCV/ImageSharp 的 dll，只有自己的 dll + 字体 + 复制源码编出的类型。
-- 包依赖检查：`ImageFacade` 不依赖任何编解码/图形库；`ImageFacade.Software` 依赖 `Sdcb.SimdCodecs` 2.0；六个适配包只依赖核心包 + 各自版本的三方库。
+- 包依赖检查：`ImageFacade` 不依赖任何编解码/图形库；`ImageFacade.SdcbSimdCodecs` 依赖 `Sdcb.SimdCodecs` 2.0；六个适配包只依赖核心包 + 各自版本的三方库。
 - 在独立空项目里分别 `PackageReference` 八个包，各能编译并跑通示例（防止共享源码漏文件）。
 - 原生库缺失时抛 `ImageBackendException`（含安装提示），不是 `DllNotFoundException` 裸栈。
-- 复制源码的命名空间/可见性检查：`ImageFacade.Software.dll` 的公开 API 里不出现 `ImageFacade.Software.Rendering.*`（全部 internal），核心 `ImageFacade.dll` 里根本没有这些类型。
+- 复制源码的命名空间/可见性检查：`ImageFacade.SdcbSimdCodecs.dll` 的公开 API 里不出现 `ImageFacade.SdcbSimdCodecs.Rendering.*`（全部 internal），核心 `ImageFacade.dll` 里根本没有这些类型。
 
 ### 健壮性
 
@@ -1232,14 +1315,14 @@ f:/code/ImageFacade/
 |---|---|---|
 | 各后端语义漂移（坐标、alpha、字体） | "同一套接口"名不副实 | 语义写死在门面层 + 一致性测试 + 每项差异记录在 misc |
 | 回退性能悬崖（每 op 两次全图拷贝） | 中文文字密集场景变慢 | 视频场景用 `Adaptive`（累计 3 次后整帧切换）；文档给出 `UseSoftware`/`SwitchAndStay`；`OnFallback` 可监控 |
-| OpenCV 不支持 alpha / 无 CJK 文字 / 坐标量化 | 功能缺失、精度损失 | 回退软后端；坐标损失写进已知差异；`NativeAsciiText` 默认关闭 |
+| OpenCV 不支持形状 alpha / 坐标量化 | 功能缺失、精度损失 | 半透明形状回退软后端；文字走托管字形光栅化（CJK + 半透明都支持）；坐标损失 ±0.5 px 写进已知差异 |
 | 每帧 LOH 分配（张量 / 帧缓冲） | 30–60 fps 下 GC 抖动 | `TensorBuffer`（ArrayPool）v1 就有；帧池 v1.1；稳定态用 `GC.GetAllocatedBytesForCurrentThread` 断言 |
 | Avalonia 预乘 / stride 不匹配 | 颜色发暗、花屏 | `CopyPixelsTo` 显式 `PixelFormat` + `stride`；`Bgra32Premultiplied`；示例对拍 |
 | ffmpeg `linesize` 对齐/负值 | 画面撕裂/倒置 | 显式 stride；负值由适配层翻转；测试覆盖带填充的 stride |
 | `Adaptive` 误切到软后端 | 该帧后续变慢 | 阈值可配；`OnFallback` 可观测；每帧新实例自动复位，不会跨帧粘滞 |
 | ImageSharp 许可证 | 商用合规 | 不打包其 dll，仅依赖；README 显著提示；软后端/Skia 作为替代 |
 | 多主版本维护（Skia 3/4、OpenCV 4/5、ImageSharp 2/3） | 每个版本都要编译/测试，shim 腐化 | 共享源码 + 每版本一个薄 shim + 每版本一个测试工程；CI 全量跑；`PublicAPI` 比对 |
-| ImgProcSharp 源码复制后与上游漂移 | 修 bug 要手动合并 | 锁定 0.1.0 快照并记录 commit；改动集中在 `ImageFacade.Software/Rendering/`；misc §Y 维护清单 |
+| ImgProcSharp 源码复制后与上游漂移 | 修 bug 要手动合并 | 锁定 0.1.0 快照并记录 commit；改动集中在 `ImageFacade.SdcbSimdCodecs/Rendering/`；misc §Y 维护清单 |
 | CPM 一个包只能一个版本 | 新旧主版本无法共存于 `Directory.Packages.props` | 旧主版本适配工程用 `VersionOverride` 或关闭 CPM（§6.5） |
 | `Sdcb.SimdCodecs` 2.0 API 较新 | `ImageBackendBase` 的解码/编码桥写错就整条链路失败 | 只在这一个文件里接触 Sdcb；锁 2.0.0；一致性测试覆盖 8/16 位、带 alpha、EXIF/ICC |
 | 包体积（Software 携带渲染源码 + Sdcb） | 想只用 Skia 的用户被迫多装 | Software 是独立包，不引用就不进依赖图；核心包保持轻量 |
@@ -1251,11 +1334,11 @@ f:/code/ImageFacade/
 ## 11. 打包与发布检查单
 
 1. 八个包同版本 `0.1.0`，`PackageLicenseExpression=Apache-2.0`（本仓库），第三方依赖的许可证在 README/`THIRD-PARTY-NOTICES.txt` 里说明。
-2. `ImageFacade` 包内：1 个 dll + 字体资源，无编解码依赖；`ImageFacade.Software` 包内另有复制源码与 `Sdcb.SimdCodecs` 2.0 依赖。
+2. `ImageFacade` 包内：1 个 dll + 字体资源，无编解码依赖；`ImageFacade.SdcbSimdCodecs` 包内另有复制源码与 `Sdcb.SimdCodecs` 2.0 依赖。
 3. 六个适配包只依赖 NuGet 上的原始包（不含源码内嵌）；共享源码只存在于本仓库，不进包。
 4. 每个包带自己的 README（安装、依赖版本、原生依赖、能力表、许可证提示）。
 5. 发布前在独立空项目按 RID 各做一次真实 `PackageReference` 验证，尤其要验证两个 Skia/ImageSharp/OpenCV 主版本不会同时被拖进来。
-6. `ImageFacade.Software` 单独验证：`PublishAot=true` 能发布并跑通软后端示例（Sdcb 2.0 + 复制源码都必须是 AOT 友好的）；核心包本身无编解码依赖。
+6. `ImageFacade.SdcbSimdCodecs` 单独验证：`PublishAot=true` 能发布并跑通软后端示例（Sdcb 2.0 + 复制源码都必须是 AOT 友好的）；核心包本身无编解码依赖。
 7. NuGet 包 ID 与三方库版本的对照表写进 README，避免用户装错 `SkiaSharp3`/`SkiaSharp`。
 
 ---
@@ -1272,5 +1355,5 @@ v1 只定"不拖后腿"的底线，不做大规模优化：
   - 软后端：同口径 ≤ 15 ms/帧。
   - OpenCV：原生绘制 ≤ 5 ms，但触发回退后整帧 ≤ 20 ms；建议这类场景用 Skia 或 `UseSoftware`。
   - letterbox + 张量化（640×640，NCHW/RGB）≤ 5 ms（软后端同口径）。
-- BenchmarkDotNet 覆盖：`ImageFacade.Software` + 六个适配包的 `Load` / `Resize` / `DrawLine×1000` / `DrawText` / `Encode`，外加"回退一次""整帧流水线""NMS/letterbox"的对照项。
+- BenchmarkDotNet 覆盖：`ImageFacade.SdcbSimdCodecs` + 六个适配包的 `Load` / `Resize` / `DrawLine×1000` / `DrawText` / `Encode`，外加"回退一次""整帧流水线""NMS/letterbox"的对照项。
 - 这些数字在 M9 用真实基准校正，届时把结论回填到 misc §N；不在计划里写死未测量的绝对值。

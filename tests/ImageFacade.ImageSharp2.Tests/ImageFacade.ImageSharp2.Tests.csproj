@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>ImageFacade.ImageSharp.Tests</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <IsAotCompatible>false</IsAotCompatible>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- xUnit1051：这里刻意用局部 CancellationTokenSource 验证取消语义 -->
+    <NoWarn>$(NoWarn);xUnit1051</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.SdcbSimdCodecs\ImageFacade.SdcbSimdCodecs.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.ImageSharp2\ImageFacade.ImageSharp2.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 同一份测试源码：两个主版本各编一遍（plan §6.5） -->
+    <Compile Include="..\ImageFacade.ImageSharp3.Tests\ImageSharpBackendTests.cs"
+             Link="ImageSharpBackendTests.cs" />
+  </ItemGroup>
+
+</Project>

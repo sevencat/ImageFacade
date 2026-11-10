@@ -16,10 +16,4 @@
     <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Compile Include="..\adapters\SkiaShared\**\*.cs"
-             Exclude="..\adapters\SkiaShared\bin\**;..\adapters\SkiaShared\obj\**"
-             Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
-  </ItemGroup>
-
 </Project>

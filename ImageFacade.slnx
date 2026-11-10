@@ -1,7 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/ImageFacade/ImageFacade.csproj" />
-    <Project Path="src/ImageFacade.Software/ImageFacade.Software.csproj" />
+    <Project Path="src/ImageFacade.SdcbSimdCodecs/ImageFacade.SdcbSimdCodecs.csproj" />
     <Project Path="src/ImageFacade.SkiaSharp/ImageFacade.SkiaSharp.csproj" />
     <Project Path="src/ImageFacade.SkiaSharp3/ImageFacade.SkiaSharp3.csproj" />
     <Project Path="src/ImageFacade.OpenCvSharp/ImageFacade.OpenCvSharp.csproj" />
@@ -11,6 +11,10 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/ImageFacade.Tests/ImageFacade.Tests.csproj" />
+    <Project Path="tests/ImageFacade.ImageSharp3.Tests/ImageFacade.ImageSharp3.Tests.csproj" />
+    <Project Path="tests/ImageFacade.ImageSharp2.Tests/ImageFacade.ImageSharp2.Tests.csproj" />
+    <Project Path="tests/ImageFacade.OpenCv4.Tests/ImageFacade.OpenCv4.Tests.csproj" />
+    <Project Path="tests/ImageFacade.OpenCv5.Tests/ImageFacade.OpenCv5.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/ImageFacade.Samples/ImageFacade.Samples.csproj" />

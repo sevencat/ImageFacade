@@ -1,0 +1,675 @@
+using System.Collections.Concurrent;
+using ImageFacade.Backends;
+using global::SkiaSharp;
+
+namespace ImageFacade.SkiaSharp;
+
+/// <summary>
+/// SkiaSharp 适配后端（视频叠加首选）。
+/// </summary>
+/// <remarks>
+/// <para>帧 = <see cref="SKBitmap"/>（<c>Rgba8888 + Premul</c>）+ 常驻 <see cref="SKCanvas"/>。</para>
+/// <para>
+/// 同一份源码被 <c>ImageFacade.SkiaSharp</c>（SKIA4）与 <c>ImageFacade.SkiaSharp3</c>（SKIA3）链接编译，
+/// 版本差异处用 <c>#if SKIA4</c> / <c>#if SKIA3</c> 隔离。
+/// </para>
+/// </remarks>
+public sealed class SkiaBackend : IImageBackend
+{
+    private static readonly IReadOnlySet<ImageFormat> Decodable = new HashSet<ImageFormat>
+    {
+        ImageFormat.Png,
+        ImageFormat.Jpeg,
+        ImageFormat.Bmp,
+        ImageFormat.Gif,
+        ImageFormat.WebP,
+        ImageFormat.Ico,
+    };
+
+    private static readonly IReadOnlySet<ImageFormat> Encodable = new HashSet<ImageFormat>
+    {
+        ImageFormat.Png,
+        ImageFormat.Jpeg,
+        ImageFormat.WebP,
+    };
+
+    private readonly ConcurrentDictionary<FontRef, SKTypeface> _typefaces = new();
+
+    public string Name => "skia";
+
+    public Version Version => typeof(SkiaBackend).Assembly.GetName().Version ?? new Version(0, 1, 0);
+
+    public BackendCapabilities Capabilities =>
+        BackendCapabilities.Resize
+        | BackendCapabilities.DrawShapes
+        | BackendCapabilities.DrawPoints
+        | BackendCapabilities.DrawText
+        | BackendCapabilities.DrawTextUnicode
+        | BackendCapabilities.AlphaBlending
+        | BackendCapabilities.Dash
+        | BackendCapabilities.LossyEncode
+        | BackendCapabilities.ExifOrientation
+        | BackendCapabilities.AotCompatible;
+
+    public IReadOnlySet<ImageFormat> SupportedDecodeFormats => Decodable;
+
+    public IReadOnlySet<ImageFormat> SupportedEncodeFormats => Encodable;
+
+    // ---- 生命周期 ----
+
+    public IFrame Create(int width, int height, Rgba32? background)
+    {
+        var frame = new SkiaFrame(new SKBitmap(new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul)));
+        if (background is { } color)
+        {
+            frame.Canvas.Clear(ToColor(color));
+        }
+
+        return frame;
+    }
+
+    public bool TryWrapPixels(IntPtr pixels, int width, int height, int stride, bool ownsMemory, out IFrame frame)
+    {
+        // Skia 绘图要求预乘；外部缓冲是直通格式，无法零拷贝接管
+        frame = null!;
+        return false;
+    }
+
+    public IFrame Clone(IFrame frame)
+    {
+        var source = (SkiaFrame)frame;
+        SKBitmap copy = source.Bitmap.Copy() ?? throw new ImageBackendException(Name, "克隆帧失败。");
+        return new SkiaFrame(copy);
+    }
+
+    public IFrame Decode(ReadOnlySpan<byte> data, in DecodeRequest request, out ImageMetadata metadata)
+    {
+        using SKData encoded = SKData.CreateCopy(data.ToArray());
+        using SKCodec codec = SKCodec.Create(encoded) ?? throw new ImageBackendException(Name, "无法识别的图像格式。");
+
+        SKImageInfo info = new(codec.Info.Width, codec.Info.Height, SKColorType.Rgba8888, SKAlphaType.Premul);
+        var bitmap = new SKBitmap(info);
+        bool transferred = false;
+        try
+        {
+            SKCodecResult result = codec.GetPixels(info, bitmap.GetPixels());
+            if (result is not (SKCodecResult.Success or SKCodecResult.IncompleteInput))
+            {
+                throw new ImageBackendException(Name, $"解码失败：{result}。");
+            }
+
+            int orientation = (int)codec.EncodedOrigin;
+            if (request.AutoOrient && orientation is > 1 and <= 8)
+            {
+                byte[] straight = ExportStraight(bitmap, out _);
+                byte[] rotated = PixelTransforms.ApplyOrientation(
+                    straight,
+                    bitmap.Width,
+                    bitmap.Height,
+                    orientation,
+                    out int rotatedWidth,
+                    out int rotatedHeight);
+
+                metadata = new ImageMetadata(MapFormat(codec.EncodedFormat), rotatedWidth, rotatedHeight, orientation);
+                return Import(rotated, rotatedWidth, rotatedHeight);
+            }
+
+            metadata = new ImageMetadata(MapFormat(codec.EncodedFormat), bitmap.Width, bitmap.Height, orientation);
+            var frame = new SkiaFrame(bitmap);
+            transferred = true;
+            return frame;
+        }
+        finally
+        {
+            if (!transferred)
+            {
+                bitmap.Dispose();
+            }
+        }
+    }
+
+    public void Encode(IFrame frame, Stream destination, in EncodeRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+
+        var source = (SkiaFrame)frame;
+        SKEncodedImageFormat format = request.Format switch
+        {
+            ImageFormat.Png => SKEncodedImageFormat.Png,
+            ImageFormat.Jpeg => SKEncodedImageFormat.Jpeg,
+            ImageFormat.WebP => SKEncodedImageFormat.Webp,
+            _ => throw new NotSupportedException($"SkiaBackend 不支持编码 {request.Format}。"),
+        };
+
+        using SKImage image = SKImage.FromBitmap(source.Bitmap);
+        using SKData? encoded = image.Encode(format, Math.Clamp(request.Quality, 1, 100));
+        if (encoded is null)
+        {
+            throw new ImageBackendException(Name, $"编码为 {request.Format} 失败。");
+        }
+
+        encoded.SaveTo(destination);
+    }
+
+    // ---- 几何 ----
+
+    public bool TryResize(IFrame frame, in ResizeRequest request, out IFrame result)
+    {
+        var source = (SkiaFrame)frame;
+        SKBitmap? resized = source.Bitmap.Resize(
+            new SKImageInfo(request.Width, request.Height, SKColorType.Rgba8888, SKAlphaType.Premul),
+            ToSampling(request.Sampler));
+
+        if (resized is null)
+        {
+            result = null!;
+            return false;
+        }
+
+        result = new SkiaFrame(resized);
+        return true;
+    }
+
+    public bool TryDrawFrame(IFrame destination, IFrame source, PointF offset)
+    {
+        var target = (SkiaFrame)destination;
+        var layer = (SkiaFrame)source;
+        using var paint = new SKPaint { IsAntialias = false };
+#if SKIA4
+        target.Canvas.DrawBitmap(layer.Bitmap, offset.X, offset.Y, new SKSamplingOptions(SKFilterMode.Nearest, SKMipmapMode.None), paint);
+#else
+        target.Canvas.DrawBitmap(layer.Bitmap, offset.X, offset.Y, paint);
+#endif
+        return true;
+    }
+
+    // ---- 绘制 ----
+
+    public bool TryDrawPoint(IFrame frame, in PointSpec spec)
+    {
+        if (!IsFinite(spec.Point) || !IsValid(spec.Radius))
+        {
+            return true;
+        }
+
+        var target = (SkiaFrame)frame;
+        using SKPaint paint = FillPaint(spec.Color, spec.Antialias);
+        target.Canvas.DrawCircle(spec.Point.X, spec.Point.Y, spec.Radius, paint);
+        return true;
+    }
+
+    public bool TryDrawLine(IFrame frame, in LineSpec spec)
+    {
+        if (!IsFinite(spec.From) || !IsFinite(spec.To) || !IsValid(spec.Width))
+        {
+            return true;
+        }
+
+        var target = (SkiaFrame)frame;
+        using SKPaint paint = StrokePaint(spec.Color, spec.Width, spec.Style);
+        target.Canvas.DrawLine(spec.From.X, spec.From.Y, spec.To.X, spec.To.Y, paint);
+        return true;
+    }
+
+    public bool TryDrawPolyline(IFrame frame, in PolylineSpec spec)
+    {
+        if (spec.Points.Length < 2 || !IsValid(spec.Width) || !AllFinite(spec.Points))
+        {
+            return true;
+        }
+
+        using SKPath path = BuildPath(spec.Points, spec.Closed);
+        var target = (SkiaFrame)frame;
+        using SKPaint paint = StrokePaint(spec.Color, spec.Width, spec.Style);
+        target.Canvas.DrawPath(path, paint);
+        return true;
+    }
+
+    public bool TryDrawRectangle(IFrame frame, in StrokedRectSpec spec)
+    {
+        if (spec.Rect.IsEmpty || !IsFinite(spec.Rect) || !IsValid(spec.Width))
+        {
+            return true;
+        }
+
+        var target = (SkiaFrame)frame;
+        using SKPaint paint = StrokePaint(spec.Color, spec.Width, spec.Style);
+        target.Canvas.DrawRect(ToRect(spec.Rect), paint);
+        return true;
+    }
+
+    public bool TryFillRectangle(IFrame frame, in FilledRectSpec spec)
+    {
+        if (spec.Rect.IsEmpty || !IsFinite(spec.Rect))
+        {
+            return true;
+        }
+
+        var target = (SkiaFrame)frame;
+        using SKPaint paint = FillPaint(spec.Color, antialias: false);
+        target.Canvas.DrawRect(ToRect(spec.Rect), paint);
+        return true;
+    }
+
+    public bool TryDrawEllipse(IFrame frame, in StrokedEllipseSpec spec)
+    {
+        if (spec.Bounds.IsEmpty || !IsFinite(spec.Bounds) || !IsValid(spec.Width))
+        {
+            return true;
+        }
+
+        var target = (SkiaFrame)frame;
+        using SKPaint paint = StrokePaint(spec.Color, spec.Width, spec.Style);
+        target.Canvas.DrawOval(ToRect(spec.Bounds), paint);
+        return true;
+    }
+
+    public bool TryFillEllipse(IFrame frame, in FilledEllipseSpec spec)
+    {
+        if (spec.Bounds.IsEmpty || !IsFinite(spec.Bounds))
+        {
+            return true;
+        }
+
+        var target = (SkiaFrame)frame;
+        using SKPaint paint = FillPaint(spec.Color, antialias: true);
+        target.Canvas.DrawOval(ToRect(spec.Bounds), paint);
+        return true;
+    }
+
+    public bool TryFillPolygon(IFrame frame, in PolygonSpec spec)
+    {
+        if (spec.Points.Length < 3 || !AllFinite(spec.Points))
+        {
+            return true;
+        }
+
+        using SKPath path = BuildPath(spec.Points, closed: true);
+        var target = (SkiaFrame)frame;
+        using SKPaint paint = FillPaint(spec.Color, antialias: true);
+        target.Canvas.DrawPath(path, paint);
+        return true;
+    }
+
+    // ---- 文字 ----
+
+    public bool TryDrawText(IFrame frame, in TextSpec spec)
+    {
+        if (spec.Text.Length == 0 || !IsFinite(spec.Origin))
+        {
+            return true;
+        }
+
+        var target = (SkiaFrame)frame;
+        SKTypeface typeface = ResolveTypeface(spec.Style.Font, out bool ownsTypeface);
+        try
+        {
+            using var font = new SKFont(typeface, spec.Style.Size)
+            {
+                Edging = SKFontEdging.Antialias,
+                Subpixel = false,
+            };
+
+            using SKPaint paint = FillPaint(spec.Style.Color, spec.Style.Antialias);
+            float baseline = spec.Style.Anchor == TextAnchor.Baseline
+                ? spec.Origin.Y
+                : spec.Origin.Y - font.Metrics.Ascent;
+
+            target.Canvas.DrawText(spec.Text, spec.Origin.X, baseline, SKTextAlign.Left, font, paint);
+            return true;
+        }
+        finally
+        {
+            if (ownsTypeface)
+            {
+                typeface.Dispose();
+            }
+        }
+    }
+
+    public bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
+    {
+        SKTypeface typeface;
+        try
+        {
+            typeface = ResolveTypeface(spec.Style.Font, out bool owns);
+            try
+            {
+                using var font = new SKFont(typeface, spec.Style.Size);
+                SKFontMetrics fontMetrics = font.Metrics;
+                float ascent = MathF.Abs(fontMetrics.Ascent);
+                float descent = MathF.Abs(fontMetrics.Descent);
+                float leading = MathF.Max(0f, fontMetrics.Leading);
+
+                metrics = new TextMetrics(font.MeasureText(spec.Text), ascent, descent, leading);
+                return true;
+            }
+            finally
+            {
+                if (owns)
+                {
+                    typeface.Dispose();
+                }
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            metrics = default;
+            return false;
+        }
+    }
+
+    // ---- 像素 ----
+
+    public void Clear(IFrame frame, Rgba32 color)
+    {
+        var target = (SkiaFrame)frame;
+        target.Canvas.Clear(ToColor(color));
+    }
+
+    public bool TryGetPixel(IFrame frame, int x, int y, out Rgba32 color)
+    {
+        var target = (SkiaFrame)frame;
+        SKColor value = target.Bitmap.GetPixel(x, y);
+        color = new Rgba32(value.Red, value.Green, value.Blue, value.Alpha);
+        return true;
+    }
+
+    public bool TryCopyPixels(IFrame frame, Span<byte> destination, int destinationStride)
+    {
+        CopyStraight(((SkiaFrame)frame).Bitmap, destination, destinationStride);
+        return true;
+    }
+
+    private static unsafe void CopyStraight(SKBitmap bitmap, Span<byte> destination, int destinationStride)
+    {
+        byte* pixels = (byte*)bitmap.GetPixels();
+        int rowBytes = bitmap.RowBytes;
+        int width = bitmap.Width;
+        int height = bitmap.Height;
+
+        for (int y = 0; y < height; y++)
+        {
+            byte* row = pixels + (y * rowBytes);
+            Span<byte> target = destination.Slice(y * destinationStride, width * 4);
+            for (int x = 0; x < width; x++)
+            {
+                byte* pixel = row + (x * 4);
+                byte alpha = pixel[3];
+                int offset = x * 4;
+
+                if (alpha is 0 or 255)
+                {
+                    target[offset] = pixel[0];
+                    target[offset + 1] = pixel[1];
+                    target[offset + 2] = pixel[2];
+                    target[offset + 3] = alpha;
+                    continue;
+                }
+
+                target[offset] = (byte)Math.Min(255, (pixel[0] * 255 + (alpha / 2)) / alpha);
+                target[offset + 1] = (byte)Math.Min(255, (pixel[1] * 255 + (alpha / 2)) / alpha);
+                target[offset + 2] = (byte)Math.Min(255, (pixel[2] * 255 + (alpha / 2)) / alpha);
+                target[offset + 3] = alpha;
+            }
+        }
+    }
+
+    public unsafe void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride)
+    {
+        var target = (SkiaFrame)frame;
+        byte* pixels = (byte*)target.Bitmap.GetPixels();
+        int rowBytes = target.Bitmap.RowBytes;
+        int width = target.Bitmap.Width;
+        int height = target.Bitmap.Height;
+
+        for (int y = 0; y < height; y++)
+        {
+            ReadOnlySpan<byte> row = source.Slice(y * sourceStride, width * 4);
+            byte* destination = pixels + (y * rowBytes);
+            for (int x = 0; x < width; x++)
+            {
+                int offset = x * 4;
+                byte alpha = row[offset + 3];
+                byte* pixel = destination + offset;
+
+                if (alpha is 0 or 255)
+                {
+                    pixel[0] = row[offset];
+                    pixel[1] = row[offset + 1];
+                    pixel[2] = row[offset + 2];
+                    pixel[3] = alpha;
+                    continue;
+                }
+
+                pixel[0] = (byte)((row[offset] * alpha + 127) / 255);
+                pixel[1] = (byte)((row[offset + 1] * alpha + 127) / 255);
+                pixel[2] = (byte)((row[offset + 2] * alpha + 127) / 255);
+                pixel[3] = alpha;
+            }
+        }
+    }
+
+    public bool TryAcquirePixels(IFrame frame, out PixelLease lease)
+    {
+        var target = (SkiaFrame)frame;
+        int stride = target.Bitmap.Width * 4;
+        int length = checked(stride * target.Bitmap.Height);
+        var buffer = new byte[length];
+        TryCopyPixels(frame, buffer, stride);
+
+        lease = new PixelLease(buffer, stride, () => ImportPixels(target, buffer, stride));
+        return true;
+    }
+
+    public void Dispose()
+    {
+        foreach (SKTypeface typeface in _typefaces.Values)
+        {
+            typeface.Dispose();
+        }
+
+        _typefaces.Clear();
+    }
+
+    // ---- 内部 ----
+
+    private IFrame Import(ReadOnlySpan<byte> straight, int width, int height)
+    {
+        var frame = (SkiaFrame)Create(width, height, background: null);
+        try
+        {
+            ImportPixels(frame, straight, width * 4);
+            return frame;
+        }
+        catch
+        {
+            frame.Dispose();
+            throw;
+        }
+    }
+
+    private static byte[] ExportStraight(SKBitmap bitmap, out int stride)
+    {
+        stride = bitmap.Width * 4;
+        var buffer = new byte[checked(stride * bitmap.Height)];
+        CopyStraight(bitmap, buffer, stride);
+        return buffer;
+    }
+
+    private SKTypeface ResolveTypeface(FontRef reference, out bool ownsTypeface)
+    {
+        if (reference.Data is { } data)
+        {
+            using SKData fontData = SKData.CreateCopy(data.ToArray());
+            SKTypeface? fromData = SKTypeface.FromData(fontData);
+            if (fromData is not null)
+            {
+                ownsTypeface = true;
+                return fromData;
+            }
+        }
+
+        if (reference.FilePath is { } path && File.Exists(path))
+        {
+            SKTypeface? fromFile = SKTypeface.FromFile(path);
+            if (fromFile is not null)
+            {
+                ownsTypeface = true;
+                return fromFile;
+            }
+        }
+
+        ownsTypeface = false;
+        return _typefaces.GetOrAdd(reference, static _ =>
+        {
+            using SKData builtIn = SKData.CreateCopy(BuiltInFont.Data.ToArray());
+            return SKTypeface.FromData(builtIn) ?? SKTypeface.Default;
+        });
+    }
+
+    /// <summary>折线 / 多边形路径。SkiaSharp 4 用 <c>SKPathBuilder</c>（SKPath 的写 API 已过时），3.x 只有 <c>SKPath</c>。</summary>
+    private static SKPath BuildPath(ReadOnlySpan<PointF> points, bool closed)
+    {
+#if SKIA4
+        var builder = new SKPathBuilder();
+        builder.MoveTo(points[0].X, points[0].Y);
+        for (int i = 1; i < points.Length; i++)
+        {
+            builder.LineTo(points[i].X, points[i].Y);
+        }
+
+        if (closed)
+        {
+            builder.Close();
+        }
+
+        return builder.Detach();
+#else
+        var path = new SKPath();
+        path.MoveTo(points[0].X, points[0].Y);
+        for (int i = 1; i < points.Length; i++)
+        {
+            path.LineTo(points[i].X, points[i].Y);
+        }
+
+        if (closed)
+        {
+            path.Close();
+        }
+
+        return path;
+#endif
+    }
+
+    private static SKColor ToColor(Rgba32 color) => new(color.R, color.G, color.B, color.A);
+
+    private static SKRect ToRect(RectF rect) => new(rect.Left, rect.Top, rect.Right, rect.Bottom);
+
+    private static SKPaint FillPaint(Rgba32 color, bool antialias) => new()
+    {
+        Color = ToColor(color),
+        IsAntialias = antialias,
+        Style = SKPaintStyle.Fill,
+    };
+
+    private static SKPaint StrokePaint(Rgba32 color, float width, StrokeStyle? style)
+    {
+        StrokeStyle resolved = style ?? StrokeStyle.Default;
+        var paint = new SKPaint
+        {
+            Color = ToColor(color),
+            IsAntialias = resolved.Antialias,
+            Style = SKPaintStyle.Stroke,
+            StrokeWidth = width,
+            StrokeCap = resolved.Cap switch
+            {
+                LineCap.Round => SKStrokeCap.Round,
+                LineCap.Square => SKStrokeCap.Square,
+                _ => SKStrokeCap.Butt,
+            },
+            StrokeJoin = resolved.Join switch
+            {
+                LineJoin.Round => SKStrokeJoin.Round,
+                LineJoin.Bevel => SKStrokeJoin.Bevel,
+                _ => SKStrokeJoin.Miter,
+            },
+            StrokeMiter = resolved.MiterLimit,
+        };
+
+        if (resolved.HasDash)
+        {
+            float[] dashes = new float[resolved.DashPattern!.Length];
+            for (int i = 0; i < dashes.Length; i++)
+            {
+                dashes[i] = resolved.DashPattern[i] * width;
+            }
+
+            paint.PathEffect = SKPathEffect.CreateDash(dashes, resolved.DashOffset * width);
+        }
+
+        return paint;
+    }
+
+    private static SKSamplingOptions ToSampling(Sampler sampler) => sampler switch
+    {
+        Sampler.Nearest => new SKSamplingOptions(SKFilterMode.Nearest, SKMipmapMode.None),
+        Sampler.Bilinear => new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None),
+        _ => new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.Linear),
+    };
+
+    private static ImageFormat MapFormat(SKEncodedImageFormat format) => format switch
+    {
+        SKEncodedImageFormat.Png => ImageFormat.Png,
+        SKEncodedImageFormat.Jpeg => ImageFormat.Jpeg,
+        SKEncodedImageFormat.Bmp => ImageFormat.Bmp,
+        SKEncodedImageFormat.Gif => ImageFormat.Gif,
+        SKEncodedImageFormat.Webp => ImageFormat.WebP,
+        SKEncodedImageFormat.Ico => ImageFormat.Ico,
+        _ => ImageFormat.Unknown,
+    };
+
+    private static bool IsFinite(PointF point) => float.IsFinite(point.X) && float.IsFinite(point.Y);
+
+    private static bool IsFinite(RectF rect)
+        => float.IsFinite(rect.X) && float.IsFinite(rect.Y) && float.IsFinite(rect.Width) && float.IsFinite(rect.Height);
+
+    private static bool AllFinite(ReadOnlySpan<PointF> points)
+    {
+        foreach (PointF point in points)
+        {
+            if (!IsFinite(point))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsValid(float value) => value > 0f && float.IsFinite(value);
+}
+
+/// <summary>Skia 帧：位图 + 常驻画布。</summary>
+internal sealed class SkiaFrame : IFrame
+{
+    internal SkiaFrame(SKBitmap bitmap)
+    {
+        Bitmap = bitmap;
+        Canvas = new SKCanvas(bitmap);
+    }
+
+    internal SKBitmap Bitmap { get; }
+
+    internal SKCanvas Canvas { get; }
+
+    public int Width => Bitmap.Width;
+
+    public int Height => Bitmap.Height;
+
+    public void Dispose()
+    {
+        Canvas.Dispose();
+        Bitmap.Dispose();
+    }
+}

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Sdcb.SimdCodecs 2.0.0 只提供 net10.0 资产，所以软后端（以及依赖它的示例）不保留 net8.0 目标。 -->
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <AssemblyName>ImageFacade.SdcbSimdCodecs</AssemblyName>
+    <RootNamespace>ImageFacade.SdcbSimdCodecs</RootNamespace>
+    <!-- 软后端是回退基准：纯托管、无原生依赖、AOT 友好（plan §1.3 / §M） -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- CA2255：模块初始化器是 plan §5.5 刻意选择的"引用即注册回退"机制 -->
+    <NoWarn>$(NoWarn);CA2255</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- OpenCV 后端的 net10.0 目标复用这里的 TrueType 解析/字形光栅化来画中文（plan §6.4） -->
+    <InternalsVisibleTo Include="ImageFacade.OpenCvSharp" />
+    <InternalsVisibleTo Include="ImageFacade.OpenCvSharp5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 编解码只在这一个工程里出现（ImageBackendBase）。2.0 是 Abstractions + 按格式包。 -->
+    <PackageReference Include="Sdcb.SimdCodecs.Abstractions" />
+    <PackageReference Include="Sdcb.SimdCodecs.Png" />
+    <PackageReference Include="Sdcb.SimdCodecs.Jpeg" />
+    <PackageReference Include="Sdcb.SimdCodecs.Bmp" />
+  </ItemGroup>
+
+</Project>

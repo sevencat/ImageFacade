@@ -54,6 +54,12 @@ internal class FakeBackend : IImageBackend
 
     public int ResizeCalls { get; private set; }
 
+    /// <summary>整帧分配次数（用来断言批量回退只建一个软帧）。</summary>
+    public int CreateCalls { get; private set; }
+
+    /// <summary>整帧导入次数（用来断言批量回退只往返一次）。</summary>
+    public int ImportCalls { get; private set; }
+
     public string Name => _name;
 
     public Version Version => new(0, 1, 0);
@@ -64,8 +70,9 @@ internal class FakeBackend : IImageBackend
 
     public virtual IReadOnlySet<ImageFormat> SupportedEncodeFormats => NoFormats;
 
-    public IFrame Create(int width, int height, Rgba32? background)
+    public virtual IFrame Create(int width, int height, Rgba32? background)
     {
+        CreateCalls++;
         var pixels = new byte[width * height * 4];
         if (background is { } color)
         {
@@ -269,6 +276,7 @@ internal class FakeBackend : IImageBackend
 
     public void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride)
     {
+        ImportCalls++;
         var target = (FakeFrame)frame;
         for (int y = 0; y < target.Height; y++)
         {

@@ -1,5 +1,5 @@
 using ImageFacade.Backends;
-using ImageFacade.Software;
+using ImageFacade.SdcbSimdCodecs;
 using Xunit;
 
 namespace ImageFacade.Tests;

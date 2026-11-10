@@ -19,10 +19,4 @@
     <PackageReference Include="SixLabors.ImageSharp.Drawing" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Compile Include="..\adapters\ImageSharpShared\**\*.cs"
-             Exclude="..\adapters\ImageSharpShared\bin\**;..\adapters\ImageSharpShared\obj\**"
-             Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
-  </ItemGroup>
-
 </Project>

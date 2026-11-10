@@ -19,8 +19,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="..\adapters\ImageSharpShared\**\*.cs"
-             Exclude="..\adapters\ImageSharpShared\bin\**;..\adapters\ImageSharpShared\obj\**"
+    <!-- 源码只有一份：放在当前主版本工程下，本工程链接编译（差异用 DefineConstants 隔离） -->
+    <Compile Include="..\ImageFacade.ImageSharp\**\*.cs"
+             Exclude="..\ImageFacade.ImageSharp\bin\**;..\ImageFacade.ImageSharp\obj\**"
              Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 

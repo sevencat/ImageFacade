@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using ImageFacade.Backends;
 using ImageFacade.Internal;
 
@@ -20,6 +21,14 @@ public sealed class FacadeImage : IDisposable
     private IFrame? _frame;
     private ImageMetadata _metadata;
     private int _fallbackCount;
+
+    // ---- 批量作用域状态（BeginDraw / Mutate）----
+    private int _batchDepth;
+    private bool _batchFlushOnNative;
+    private IFrame? _batchSoftFrame;
+    private IImageBackend? _batchSoftBackend;
+    private string? _batchFeature;
+    private long _batchStartedTimestamp;
 
     internal FacadeImage(ImageEngine engine, IImageBackend backend, IFrame frame, ImageMetadata metadata)
     {
@@ -61,6 +70,7 @@ public sealed class FacadeImage : IDisposable
     {
         ThrowIfDisposed();
         ImageEngine.ValidateSize(width, height);
+        FlushBatch();
         ResizeCore(width, height, Sampler.Bicubic);
         return this;
     }
@@ -71,6 +81,7 @@ public sealed class FacadeImage : IDisposable
         ArgumentNullException.ThrowIfNull(options);
         ThrowIfDisposed();
         ImageEngine.ValidateSize(options.Width, options.Height);
+        FlushBatch();
 
         ResizePlan plan = ResizePlanner.Plan(Width, Height, options.Width, options.Height, options.Mode);
         ResizeCore(plan.ScaledWidth, plan.ScaledHeight, options.Sampler);
@@ -114,6 +125,17 @@ public sealed class FacadeImage : IDisposable
     public FacadeImage Clear(Rgba32 color)
     {
         ThrowIfDisposed();
+        if (_batchSoftFrame is { } batchFrame)
+        {
+            if (!ShouldFlushOnNative)
+            {
+                _batchSoftBackend!.Clear(batchFrame, color);
+                return this;
+            }
+
+            FlushBatch();
+        }
+
         _backend.Clear(Frame, color);
         return this;
     }
@@ -236,9 +258,44 @@ public sealed class FacadeImage : IDisposable
 
     // ---- 生命周期 / 后端切换 ----
 
+    /// <summary>
+    /// 批量绘制作用域（对应 ImageSharp 的 <c>Mutate</c>）：作用域内第一次触发回退时把整帧导出到软帧一次，
+    /// 之后所有操作都在软帧上按原顺序执行，结束时只写回一次。
+    /// </summary>
+    /// <param name="draw">在这张图上连续绘制。</param>
+    /// <param name="flushOnNative">true = 每个操作开始前先把软帧写回，让"原生能做的操作"切回原生（不粘滞）。</param>
+    public FacadeImage Mutate(Action<FacadeImage> draw, bool flushOnNative = false)
+    {
+        ArgumentNullException.ThrowIfNull(draw);
+        ThrowIfDisposed();
+
+        BeginBatchScope(flushOnNative);
+        try
+        {
+            draw(this);
+        }
+        catch
+        {
+            AbortBatchScope();
+            throw;
+        }
+
+        EndBatchScope();
+        return this;
+    }
+
+    /// <summary>打开批量绘制作用域；<c>Dispose</c> 时统一 flush。</summary>
+    public DrawBatch BeginDraw(bool flushOnNative = false)
+    {
+        ThrowIfDisposed();
+        BeginBatchScope(flushOnNative);
+        return new DrawBatch(this);
+    }
+
     public FacadeImage Clone()
     {
         ThrowIfDisposed();
+        FlushBatch();
         IFrame copy = _backend.Clone(Frame);
         return new FacadeImage(_engine, _backend, copy, _metadata);
     }
@@ -247,6 +304,7 @@ public sealed class FacadeImage : IDisposable
     public FacadeImage UseSoftware()
     {
         ThrowIfDisposed();
+        FlushBatch();
         MigrateTo(RequireFallback(nameof(UseSoftware)));
         return this;
     }
@@ -255,6 +313,7 @@ public sealed class FacadeImage : IDisposable
     public FacadeImage UseNative()
     {
         ThrowIfDisposed();
+        FlushBatch();
         MigrateTo(_engine.Backend);
         return this;
     }
@@ -325,7 +384,16 @@ public sealed class FacadeImage : IDisposable
         if (_backend is IAsyncImageBackend asyncBackend)
         {
             var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata);
-            await asyncBackend.EncodeAsync(Frame, stream, request, cancellationToken).ConfigureAwait(false);
+            EncodableFrame encodable = PrepareForEncode(save, format);
+            try
+            {
+                await asyncBackend.EncodeAsync(encodable.Frame, stream, request, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                encodable.Temp?.Dispose();
+            }
+
             return;
         }
 
@@ -347,7 +415,16 @@ public sealed class FacadeImage : IDisposable
         {
             using var buffer = new MemoryStream();
             var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata);
-            await asyncBackend.EncodeAsync(Frame, buffer, request, cancellationToken).ConfigureAwait(false);
+            EncodableFrame encodable = PrepareForEncode(save, format);
+            try
+            {
+                await asyncBackend.EncodeAsync(encodable.Frame, buffer, request, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                encodable.Temp?.Dispose();
+            }
+
             return buffer.ToArray();
         }
 
@@ -379,6 +456,7 @@ public sealed class FacadeImage : IDisposable
     public Rgba32 GetPixel(int x, int y)
     {
         ThrowIfDisposed();
+        FlushBatch();
         if ((uint)x >= (uint)Width)
         {
             throw new ArgumentOutOfRangeException(nameof(x), x, $"x 必须在 0..{Width - 1}。");
@@ -397,6 +475,7 @@ public sealed class FacadeImage : IDisposable
     public void CopyPixelsTo(Span<byte> destination, int destinationStride, PixelFormat format = PixelFormat.Rgba32)
     {
         ThrowIfDisposed();
+        FlushBatch();
 
         int bpp = format.GetBytesPerPixel();
         int rowBytes = Width * bpp;
@@ -466,6 +545,7 @@ public sealed class FacadeImage : IDisposable
     public PixelLease AcquirePixels()
     {
         ThrowIfDisposed();
+        FlushBatch();
         return _backend.TryAcquirePixels(Frame, out PixelLease lease)
             ? lease
             : throw new FeatureNotSupportedException(nameof(AcquirePixels), _backend.Name, _engine.Options.Fallback);
@@ -477,12 +557,26 @@ public sealed class FacadeImage : IDisposable
     {
         ThrowIfDisposed();
 
+        // 批量作用域内已经切到软帧：后续操作按原顺序全部在软帧上执行（一次往返）
+        if (_batchSoftFrame is not null)
+        {
+            if (!ShouldFlushOnNative)
+            {
+                ExecuteOnBatch(feature, in spec, operation);
+                return this;
+            }
+
+            FlushBatch();
+        }
+
         if (!_engine.Options.PreferSoftwareRendering && operation(_backend, Frame, in spec))
         {
             return this;
         }
 
-        return ExecuteFallback(feature, in spec, operation);
+        return _batchDepth > 0
+            ? ExecuteBatch(feature, in spec, operation)
+            : ExecuteFallback(feature, in spec, operation);
     }
 
     private FacadeImage ExecuteFallback<TSpec>(string feature, in TSpec spec, SpecOperation<TSpec> operation)
@@ -524,6 +618,178 @@ public sealed class FacadeImage : IDisposable
         return this;
     }
 
+    /// <summary>执行一批"后端不支持"的操作：第一次回退时把整帧导出到软帧，之后复用同一个软帧。</summary>
+    private FacadeImage ExecuteBatch<TSpec>(string feature, in TSpec spec, SpecOperation<TSpec> operation)
+    {
+        if (_engine.Options.Strict)
+        {
+            throw new FeatureNotSupportedException(feature, _backend.Name, _engine.Options.Fallback);
+        }
+
+        IImageBackend fallback = RequireFallback(feature);
+        if (ReferenceEquals(fallback, _backend))
+        {
+            // 已经在回退目标上却仍不支持：真不支持，不再尝试
+            if (!operation(_backend, Frame, in spec))
+            {
+                throw new FeatureNotSupportedException(feature, _backend.Name, _engine.Options.Fallback);
+            }
+
+            return this;
+        }
+
+        EnsureBatchSoft(fallback, feature);
+        ExecuteOnBatch(feature, in spec, operation);
+        return this;
+    }
+
+    private void ExecuteOnBatch<TSpec>(string feature, in TSpec spec, SpecOperation<TSpec> operation)
+    {
+        IImageBackend soft = _batchSoftBackend!;
+        if (!operation(soft, _batchSoftFrame!, in spec))
+        {
+            throw new FeatureNotSupportedException(feature, soft.Name, _engine.Options.Fallback);
+        }
+    }
+
+    /// <summary>把当前帧导出到批量软帧（一次全图拷贝 + 一次软帧分配）。</summary>
+    private void EnsureBatchSoft(IImageBackend soft, string feature)
+    {
+        int width = Width;
+        int height = Height;
+        int stride = width * 4;
+        int length = checked(stride * height);
+        byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+        IFrame softFrame = soft.Create(width, height, background: null);
+        try
+        {
+            Span<byte> canonical = rented.AsSpan(0, length);
+            if (!_backend.TryCopyPixels(Frame, canonical, stride))
+            {
+                throw new FeatureNotSupportedException(feature, _backend.Name, _engine.Options.Fallback);
+            }
+
+            soft.ImportPixels(softFrame, canonical, stride);
+        }
+        catch
+        {
+            softFrame.Dispose();
+            throw;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+
+        _batchSoftFrame = softFrame;
+        _batchSoftBackend = soft;
+        _batchFeature = feature;
+        _batchStartedTimestamp = Stopwatch.GetTimestamp();
+    }
+
+    /// <summary>
+    /// 把批量软帧写回当前后端（一次全图拷贝）。<see cref="FallbackMode.SwitchAndStay"/> 与累计达到阈值的
+    /// <see cref="FallbackMode.Adaptive"/> 直接接管软帧，省掉这次拷贝。
+    /// </summary>
+    private void FlushBatch()
+    {
+        IFrame? softFrame = _batchSoftFrame;
+        IImageBackend? soft = _batchSoftBackend;
+        string feature = _batchFeature ?? "Draw";
+        long startTimestamp = _batchStartedTimestamp;
+        _batchSoftFrame = null;
+        _batchSoftBackend = null;
+        _batchFeature = null;
+
+        if (softFrame is null || soft is null)
+        {
+            return;
+        }
+
+        string sourceBackend = _backend.Name;
+        _fallbackCount++;
+
+        if (ShouldSwitch())
+        {
+            IFrame previous = Frame;
+            _frame = softFrame;
+            _backend = soft;
+            IsZeroCopy = false;
+            previous.Dispose();
+        }
+        else
+        {
+            int stride = Width * 4;
+            int length = checked(stride * Height);
+            byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+            try
+            {
+                Span<byte> canonical = rented.AsSpan(0, length);
+                if (!soft.TryCopyPixels(softFrame, canonical, stride))
+                {
+                    throw new FeatureNotSupportedException(feature, soft.Name, _engine.Options.Fallback);
+                }
+
+                _backend.ImportPixels(Frame, canonical, stride);
+            }
+            finally
+            {
+                softFrame.Dispose();
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
+
+        RaiseFallback(sourceBackend, soft.Name, feature, startTimestamp);
+    }
+
+    internal void FlushBatchScope() => FlushBatch();
+
+    internal void BeginBatchScope(bool flushOnNative)
+    {
+        if (_batchDepth++ == 0)
+        {
+            _batchFlushOnNative = flushOnNative;
+        }
+    }
+
+    /// <summary>
+    /// 是否在每次操作前先写回软帧。<see cref="ImageEngineOptions.PreferSoftwareRendering"/> 下没有"原生"可回，
+    /// 所以一律粘滞（否则每个 op 都会写回再重建软帧）。
+    /// </summary>
+    private bool ShouldFlushOnNative => _batchFlushOnNative && !_engine.Options.PreferSoftwareRendering;
+
+    internal void EndBatchScope()
+    {
+        if (_batchDepth == 0)
+        {
+            return;
+        }
+
+        if (--_batchDepth == 0)
+        {
+            try
+            {
+                FlushBatch();
+            }
+            finally
+            {
+                _batchFlushOnNative = false;
+            }
+        }
+    }
+
+    /// <summary>作用域内抛出异常时调用：丢弃软帧，不把半成品写回（已有操作留在软帧里一起丢弃）。</summary>
+    internal void AbortBatchScope()
+    {
+        _batchDepth = 0;
+        _batchFlushOnNative = false;
+        _batchFeature = null;
+        _batchSoftBackend = null;
+        IFrame? softFrame = _batchSoftFrame;
+        _batchSoftFrame = null;
+        softFrame?.Dispose();
+    }
+
     private void RunTemporary<TSpec>(IImageBackend fallback, string feature, TSpec spec, SpecOperation<TSpec> operation)
     {
         int stride = Width * 4;
@@ -561,6 +827,17 @@ public sealed class FacadeImage : IDisposable
     /// <summary>折线 / 多边形用：<see cref="PolylineSpec"/> 是 ref struct，不能当泛型实参，所以单独走一条路径。</summary>
     private FacadeImage ExecutePoints(string feature, ReadOnlySpan<PointF> points, Rgba32 color, float width, bool closed, StrokeStyle? style, bool filled)
     {
+        if (_batchSoftFrame is not null)
+        {
+            if (!ShouldFlushOnNative)
+            {
+                ExecutePointsOnBatch(feature, points, color, width, closed, style, filled);
+                return this;
+            }
+
+            FlushBatch();
+        }
+
         if (!_engine.Options.PreferSoftwareRendering && TryPointOperation(_backend, Frame, points, color, width, closed, style, filled))
         {
             return this;
@@ -579,6 +856,13 @@ public sealed class FacadeImage : IDisposable
                 throw new FeatureNotSupportedException(feature, _backend.Name, _engine.Options.Fallback);
             }
 
+            return this;
+        }
+
+        if (_batchDepth > 0)
+        {
+            EnsureBatchSoft(fallback, feature);
+            ExecutePointsOnBatch(feature, points, color, width, closed, style, filled);
             return this;
         }
 
@@ -630,6 +914,15 @@ public sealed class FacadeImage : IDisposable
 
         RaiseFallback(sourceBackend, fallback.Name, feature, startTimestamp);
         return this;
+    }
+
+    private void ExecutePointsOnBatch(string feature, ReadOnlySpan<PointF> points, Rgba32 color, float width, bool closed, StrokeStyle? style, bool filled)
+    {
+        IImageBackend soft = _batchSoftBackend!;
+        if (!TryPointOperation(soft, _batchSoftFrame!, points, color, width, closed, style, filled))
+        {
+            throw new FeatureNotSupportedException(feature, soft.Name, _engine.Options.Fallback);
+        }
     }
 
     private static bool TryPointOperation(
@@ -689,16 +982,28 @@ public sealed class FacadeImage : IDisposable
             return;
         }
 
-        byte[] pixels = CopyCanonicalPixels(out int stride);
+        int stride = Width * 4;
+        int length = checked(stride * Height);
+        byte[] rented = ArrayPool<byte>.Shared.Rent(length);
         IFrame frame = target.Create(Width, Height, background: null);
         try
         {
-            target.ImportPixels(frame, pixels, stride);
+            Span<byte> canonical = rented.AsSpan(0, length);
+            if (!_backend.TryCopyPixels(Frame, canonical, stride))
+            {
+                throw new FeatureNotSupportedException(nameof(CopyPixels), _backend.Name, _engine.Options.Fallback);
+            }
+
+            target.ImportPixels(frame, canonical, stride);
         }
         catch
         {
             frame.Dispose();
             throw;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
         }
 
         IFrame previous = Frame;
@@ -824,60 +1129,188 @@ public sealed class FacadeImage : IDisposable
         ValidateSaveOptions(save);
 
         var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata);
-
-        if (_backend.SupportedEncodeFormats.Contains(format))
-        {
-            try
-            {
-                _backend.Encode(Frame, stream, in request);
-                return;
-            }
-            catch (NotSupportedException)
-            {
-                // 落到回退路径
-            }
-            catch (Exception ex) when (ex is not ImageBackendException)
-            {
-                throw new ImageBackendException(_backend.Name, $"编码为 {format} 失败。", ex);
-            }
-        }
-
-        if (_engine.Options.Strict)
-        {
-            throw new FeatureNotSupportedException("Encode", _backend.Name, _engine.Options.Fallback);
-        }
-
-        string sourceBackend = _backend.Name;
-        long startTimestamp = Stopwatch.GetTimestamp();
-
-        IImageBackend fallback = RequireFallback("Encode");
-        if (ReferenceEquals(fallback, _backend))
-        {
-            throw new FeatureNotSupportedException("Encode", _backend.Name, _engine.Options.Fallback);
-        }
-
-        byte[] pixels = CopyCanonicalPixels(out int stride);
-        IFrame temp = fallback.Create(Width, Height, background: null);
+        EncodableFrame encodable = PrepareForEncode(save, format);
         try
         {
-            fallback.ImportPixels(temp, pixels, stride);
-            fallback.Encode(temp, stream, in request);
-            _fallbackCount++;
-            RaiseFallback(sourceBackend, fallback.Name, "Encode", startTimestamp);
+            IFrame source = encodable.Frame;
+
+            if (_backend.SupportedEncodeFormats.Contains(format))
+            {
+                try
+                {
+                    _backend.Encode(source, stream, in request);
+                    return;
+                }
+                catch (NotSupportedException)
+                {
+                    // 落到回退路径
+                }
+                catch (Exception ex) when (ex is not ImageBackendException)
+                {
+                    throw new ImageBackendException(_backend.Name, $"编码为 {format} 失败。", ex);
+                }
+            }
+
+            if (_engine.Options.Strict)
+            {
+                throw new FeatureNotSupportedException("Encode", _backend.Name, _engine.Options.Fallback);
+            }
+
+            string sourceBackend = _backend.Name;
+            long startTimestamp = Stopwatch.GetTimestamp();
+
+            IImageBackend fallback = RequireFallback("Encode");
+            if (ReferenceEquals(fallback, _backend))
+            {
+                throw new FeatureNotSupportedException("Encode", _backend.Name, _engine.Options.Fallback);
+            }
+
+            int stride = Width * 4;
+            int length = checked(stride * Height);
+            byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+            IFrame temp = fallback.Create(Width, Height, background: null);
+            try
+            {
+                Span<byte> canonical = rented.AsSpan(0, length);
+                if (!_backend.TryCopyPixels(source, canonical, stride))
+                {
+                    throw new FeatureNotSupportedException("Encode", _backend.Name, _engine.Options.Fallback);
+                }
+
+                fallback.ImportPixels(temp, canonical, stride);
+                fallback.Encode(temp, stream, in request);
+                _fallbackCount++;
+                RaiseFallback(sourceBackend, fallback.Name, "Encode", startTimestamp);
+            }
+            finally
+            {
+                temp.Dispose();
+                ArrayPool<byte>.Shared.Return(rented);
+            }
         }
         finally
         {
-            temp.Dispose();
+            encodable.Temp?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// 编码前的准备：目标格式没有 alpha（JPEG / BMP）时，先按 <see cref="SaveOptions.BackgroundColor"/>
+    /// 把透明像素合成到不透明的临时帧上；已经全不透明则直接用原帧（plan §3.2 / M8）。
+    /// </summary>
+    private EncodableFrame PrepareForEncode(SaveOptions save, ImageFormat format)
+    {
+        FlushBatch();
+
+        if (format.SupportsAlpha())
+        {
+            return new EncodableFrame(Frame, null);
+        }
+
+        int stride = Width * 4;
+        int length = checked(stride * Height);
+        byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+        IFrame? frame = null;
+        try
+        {
+            Span<byte> canonical = rented.AsSpan(0, length);
+            if (!_backend.TryCopyPixels(Frame, canonical, stride))
+            {
+                throw new FeatureNotSupportedException(nameof(CopyPixels), _backend.Name, _engine.Options.Fallback);
+            }
+
+            if (!CompositeOverBackground(rented, stride, save.BackgroundColor))
+            {
+                return new EncodableFrame(Frame, null);
+            }
+
+            frame = _backend.Create(Width, Height, background: null);
+            _backend.ImportPixels(frame, canonical, stride);
+            return new EncodableFrame(frame, frame);
+        }
+        catch
+        {
+            frame?.Dispose();
+            throw;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>把直通 RGBA 就地合成到 <paramref name="background"/> 上；返回 false 表示本来就全不透明。</summary>
+    private bool CompositeOverBackground(byte[] pixels, int stride, Rgba32 background)
+    {
+        int width = Width;
+        int height = Height;
+        bool hasTransparency = false;
+
+        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(pixels.AsSpan(0, stride * height));
+        foreach (uint word in words)
+        {
+            if ((word & 0xFF000000u) != 0xFF000000u)
+            {
+                hasTransparency = true;
+                break;
+            }
+        }
+
+        if (!hasTransparency)
+        {
+            return false;
+        }
+
+        byte backgroundRed = background.R;
+        byte backgroundGreen = background.G;
+        byte backgroundBlue = background.B;
+
+        for (int y = 0; y < height; y++)
+        {
+            int row = y * stride;
+            for (int x = 0; x < width; x++)
+            {
+                int offset = row + (x * 4);
+                int alpha = pixels[offset + 3];
+                if (alpha == 255)
+                {
+                    continue;
+                }
+
+                int inverse = 255 - alpha;
+                pixels[offset] = (byte)(((pixels[offset] * alpha) + (backgroundRed * inverse) + 127) / 255);
+                pixels[offset + 1] = (byte)(((pixels[offset + 1] * alpha) + (backgroundGreen * inverse) + 127) / 255);
+                pixels[offset + 2] = (byte)(((pixels[offset + 2] * alpha) + (backgroundBlue * inverse) + 127) / 255);
+                pixels[offset + 3] = 255;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>编码用的一帧：可能是指向临时不透明副本的所有权。</summary>
+    private readonly struct EncodableFrame
+    {
+        internal EncodableFrame(IFrame frame, IFrame? temp)
+        {
+            Frame = frame;
+            Temp = temp;
+        }
+
+        internal IFrame Frame { get; }
+
+        internal IFrame? Temp { get; }
     }
 
     // ---- 辅助 ----
 
-    private byte[] CopyCanonicalPixels(out int stride)
+    private byte[] CopyCanonicalPixels(out int stride) => CopyCanonicalPixels(Frame, out stride);
+
+    private byte[] CopyCanonicalPixels(IFrame frame, out int stride)
     {
         stride = Width * 4;
         var buffer = new byte[checked(stride * Height)];
-        if (!_backend.TryCopyPixels(Frame, buffer, stride))
+        if (!_backend.TryCopyPixels(frame, buffer, stride))
         {
             throw new FeatureNotSupportedException(nameof(CopyPixels), _backend.Name, _engine.Options.Fallback);
         }
@@ -896,13 +1329,8 @@ public sealed class FacadeImage : IDisposable
 
     private static void Fill(byte[] buffer, Rgba32 color)
     {
-        for (int i = 0; i < buffer.Length; i += 4)
-        {
-            buffer[i] = color.R;
-            buffer[i + 1] = color.G;
-            buffer[i + 2] = color.B;
-            buffer[i + 3] = color.A;
-        }
+        uint packed = (uint)(color.R | (color.G << 8) | (color.B << 16) | (color.A << 24));
+        MemoryMarshal.Cast<byte, uint>(buffer.AsSpan()).Fill(packed);
     }
 
     private static void Blit(
@@ -940,6 +1368,13 @@ public sealed class FacadeImage : IDisposable
 
     public void Dispose()
     {
+        IFrame? batchSoft = _batchSoftFrame;
+        _batchSoftFrame = null;
+        _batchSoftBackend = null;
+        _batchFeature = null;
+        _batchDepth = 0;
+        batchSoft?.Dispose();
+
         IFrame? frame = _frame;
         _frame = null;
         frame?.Dispose();
