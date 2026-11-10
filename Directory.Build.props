@@ -9,6 +9,9 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- 版本是每个包自己的事：各工程在自己的 csproj 里用 <Version> 显式声明（见 README「版本与兼容」）。
+         这里的 VersionPrefix 只是**兜底**——新工程忘了声明时的默认值，不要指望它统一所有包的版本。
+         核心与各后端各自独立发版；核心保持前向兼容时，后端不需要跟着重发。 -->
     <VersionPrefix>0.2</VersionPrefix>
 
     <!-- 包名统一加 Sevencat. 前缀；工程名 = 包名主干 -->

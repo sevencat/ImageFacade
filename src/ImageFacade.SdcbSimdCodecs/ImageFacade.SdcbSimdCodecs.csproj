@@ -1,6 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <!-- 独立版本线：软后端可单独发版、单独被引用，不跟随核心包的 VersionPrefix。
+         0.1.1 = 在 0.1.0 基础上把编解码改成"按需注册"（去掉内置 Png/Jpeg/Bmp 依赖）。 -->
+    <Version>0.1.1</Version>
     <!-- Sdcb.SimdCodecs 2.0.0 只提供 net10.0 资产，所以软后端（以及依赖它的示例）不保留 net8.0 目标。 -->
     <TargetFrameworks>net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade.SdcbSimdCodecs</AssemblyName>
@@ -16,6 +19,16 @@
   <ItemGroup>
     <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
   </ItemGroup>
+
+  <!-- 打包注意：本包版本是独立的 0.1.1，而 Directory.Build.props 的 VersionPrefix 已到 0.2
+       （核心 0.2.0 还没发到 nuget）。因此单独发这个包时必须带：
+           dotnet pack src/ImageFacade.SdcbSimdCodecs -c Release -p:VersionPrefix=0.1
+       这样核心按 0.1.0 编译，nuspec 依赖也写成 0.1.0；不带就会引用未发布的 0.2.0，
+       装到干净工程里会在运行时报 FileNotFoundException。
+       等核心 0.2.0 发布后，走全量 `dotnet pack ImageFacade.slnx` 即可，无需额外参数；
+       但那时本包仍是 0.1.1，全量打包会重复产出同一版本——推送时带 --skip-duplicate，
+       或者只打包这次真要发的包。 -->
+
 
   <ItemGroup>
     <!-- OpenCV 后端的 net10.0 目标复用这里的 TrueType 解析/字形光栅化来画中文（plan §6.4） -->

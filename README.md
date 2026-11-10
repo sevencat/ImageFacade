@@ -65,6 +65,23 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 
 后端包已带上对应三方库的依赖，不需要重复声明 `SkiaSharp` / `OpenCvSharp4` / `SixLabors.ImageSharp`。
 
+### 版本与兼容
+
+**每个包独立发版**，不搞"七个包同进同退"：
+
+| 包 | 版本线 |
+|---|---|
+| `Sevencat.ImageFacade`（核心） | 独立；**patch / minor 只做加法**，不破坏已发布的公开 API |
+| 各后端（SkiaSharp / ImageSharp / ImageSharp2 / OpenCvSharp / OpenCvSharp5 / SdcbSimdCodecs） | 各自独立，可以只升其中一个 |
+
+三条约定：
+
+1. **后端依赖核心只用下界**：nuspec 里写的是 `Sevencat.ImageFacade >= X.Y.Z`，不是精确版本。
+2. **核心前向兼容时，后端不用重发**：核心只做"加 API / 修 bug"的兼容改动时，把它升到更高的 `X.Y.Z+n`，现有后端包照常工作；只有核心做了不兼容改动（升主版本）才需要后端重新发版对齐。
+3. **只升后端也安全**：后端只用到核心的旧 API，升级某个后端不会连累核心。
+
+各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.2.0"` 是下一个统一基线的取值。
+
 | 包 | 后端类 | 三方库 | 说明 |
 |---|---|---|---|
 | [`Sevencat.ImageFacade`](https://www.nuget.org/packages/Sevencat.ImageFacade) | — | 无 | 核心：契约 + 路由 + 排版 + 内置字体 + Pipeline |
