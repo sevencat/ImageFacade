@@ -16,7 +16,7 @@ public sealed class SoftwareBackendTests
         using var engine = CreateEngine();
         using FacadeImage image = engine.Create(8, 8, Rgba32.White);
 
-        // 软后端自带 PNG/JPEG/BMP；GIF 没注册 → 能力表里没有它
+        // 测试工程注册了 PNG/JPEG/BMP（见 TestCodecs）；GIF 没注册 → 能力表里没有它
         Assert.False(engine.CanEncode(ImageFormat.Gif));
         Assert.False(engine.CanDecode(ImageFormat.Gif));
 

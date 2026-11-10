@@ -22,6 +22,8 @@
     <!-- 示例跑在本机，需要原生库；适配包本身不引（plan §6.2） -->
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" />
     <PackageReference Include="OpenCvSharp4.runtime.win" />
+    <!-- 软后端只带编解码抽象：示例只存 PNG，所以只引这一个格式包并在启动时注册 -->
+    <PackageReference Include="Sdcb.SimdCodecs.Png" />
   </ItemGroup>
 
 </Project>

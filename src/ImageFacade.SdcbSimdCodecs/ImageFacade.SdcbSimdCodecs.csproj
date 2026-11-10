@@ -5,7 +5,7 @@
     <TargetFrameworks>net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade.SdcbSimdCodecs</AssemblyName>
     <RootNamespace>ImageFacade.SdcbSimdCodecs</RootNamespace>
-    <Description>ImageFacade 的纯托管后端：Sdcb.SimdCodecs 编解码 + 自绘渲染，无原生依赖、AOT 友好，输出确定。</Description>
+    <Description>ImageFacade 的纯托管后端：自绘渲染（图形/文字/Resize）+ 可插拔编解码（Sdcb.SimdCodecs 格式包按需注册），无原生依赖、AOT 友好、输出确定。</Description>
     <!-- 软后端是回退基准：纯托管、无原生依赖、AOT 友好（plan §1.3 / §M） -->
     <IsAotCompatible>true</IsAotCompatible>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
@@ -24,11 +24,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 编解码只在这一个工程里出现（ImageBackendBase）。2.0 是 Abstractions + 按格式包。 -->
+    <!-- 只引抽象：具体格式（Png / Jpeg / Bmp / Gif / Webp / Tiff …）由使用方按需引包并注册，
+         见 README 的「软后端：按需接入编解码」。本包不自带任何编解码器。 -->
     <PackageReference Include="Sdcb.SimdCodecs.Abstractions" />
-    <PackageReference Include="Sdcb.SimdCodecs.Png" />
-    <PackageReference Include="Sdcb.SimdCodecs.Jpeg" />
-    <PackageReference Include="Sdcb.SimdCodecs.Bmp" />
   </ItemGroup>
 
 </Project>

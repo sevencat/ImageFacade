@@ -1,21 +1,16 @@
 using System.Runtime.CompilerServices;
 using ImageFacade.Backends;
-using Sdcb.SimdCodecs.Abstractions;
 using Sdcb.SimdCodecs.Bmp;
 using Sdcb.SimdCodecs.Jpeg;
 using Sdcb.SimdCodecs.Png;
 
-namespace ImageFacade.SdcbSimdCodecs;
+namespace ImageFacade.SdcbSimdCodecs.Tests;
 
 /// <summary>
-/// 把软后端自带的编解码器注册进 <see cref="ImageBackendBase"/>。
-/// 依赖方向：这里（软后端包）引用具体格式包与 Abstractions；基类只认识 Abstractions 的抽象。
+/// 测试工程以"使用方"的身份注册编解码器：软后端包本身不再自带任何格式，
+/// 这里注册的就是 README「软后端：按需接入编解码」里演示的那三个。
 /// </summary>
-/// <remarks>
-/// 引用本程序集时模块初始化器自动执行一次；要在同一进程里换格式集合，可先
-/// <see cref="ImageBackendBase.ClearCodecs"/> 再自行注册。
-/// </remarks>
-internal static class SoftwareCodecs
+internal static class TestCodecs
 {
     [ModuleInitializer]
     internal static void Register()

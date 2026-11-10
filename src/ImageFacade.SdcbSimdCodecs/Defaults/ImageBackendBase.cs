@@ -20,9 +20,11 @@ namespace ImageFacade.Backends;
 /// 像素读写（<see cref="TryCopyPixels"/> / <see cref="ImportPixels"/>）与绘制能力（默认全部不支持）。
 /// </para>
 /// <para>
-/// 接入新格式：在软后端包（或其他使用方）加一个 <c>Sdcb.SimdCodecs.Xxx</c> 包，调用一次
-/// <see cref="RegisterCodec"/> 即可，基类不需要改。软后端自带的 PNG/JPEG/BMP 在
-/// <c>SoftwareCodecs</c> 的模块初始化器里注册。
+/// 本程序集<b>不自带任何编解码器</b>：使用方按需引一个 <c>Sdcb.SimdCodecs.Xxx</c> 包
+/// （Png / Jpeg / Bmp / Gif / Webp / Tiff / Ico / Qoi / Pnm / Jpeg2000 / Jbig2，HEIF 需评估专利），
+/// 在启动阶段调用一次 <see cref="RegisterCodec"/>（或只注册解码 / 只注册编码）即可，基类不需要改。
+/// 没注册的格式不会出现在 <see cref="SupportedDecodeFormats"/> / <see cref="SupportedEncodeFormats"/> 里，
+/// 调用时抛 <see cref="FeatureNotSupportedException"/>。
 /// </para>
 /// </remarks>
 public abstract class ImageBackendBase : IImageBackend
@@ -37,8 +39,8 @@ public abstract class ImageBackendBase : IImageBackend
     // ---- 编解码注册 ----
 
     /// <summary>
-    /// 注册一个格式的解码器与编码器。可在任意线程调用；建议在启动阶段完成
-    /// （软后端用自己的模块初始化器自动注册 PNG/JPEG/BMP）。
+    /// 注册一个格式的解码器与编码器。注册是**进程级静态**的，注册一次即可；
+    /// 可在任意线程调用，建议在启动阶段（<c>[ModuleInitializer]</c> 或 <c>Main</c> 开头）完成。
     /// </summary>
     /// <param name="format">门面格式。</param>
     /// <param name="decoder">Abstractions 的解码器注册（来自具体格式包，如 <c>PngImageDecoder.Registration</c>）。</param>
@@ -80,7 +82,7 @@ public abstract class ImageBackendBase : IImageBackend
         RefreshFormats();
     }
 
-    /// <summary>清空全部注册（主要给测试用：验证"没注册就抛"）。</summary>
+    /// <summary>清空全部注册（主要给测试用：验证"没注册就抛"）。清空后需要重新注册。</summary>
     public static void ClearCodecs()
     {
         s_decoders.Clear();

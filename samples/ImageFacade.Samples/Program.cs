@@ -14,6 +14,13 @@ using CvRect = OpenCvSharp.Rect;
 using CvScalar = OpenCvSharp.Scalar;
 using CvSize = OpenCvSharp.Size;
 
+// 软后端不自带编解码器：示例只需要写出 PNG，所以只引 Sdcb.SimdCodecs.Png 并注册这一个。
+// 注册是进程级静态的，启动时做一次即可；需要 JPEG/BMP/GIF/WebP/TIFF 就再引对应包、加一行注册。
+ImageBackendBase.RegisterCodec(
+    ImageFormat.Png,
+    Sdcb.SimdCodecs.Png.PngImageDecoder.Registration,
+    Sdcb.SimdCodecs.Png.PngImageEncoder.Registration);
+
 // 示例集：生成 README 用的截图，同时充当跨后端的冒烟测试。
 // 输出固定写到仓库根的 docs/images，与当前工作目录无关。
 string outputDirectory = Path.Combine(FindRepositoryRoot(), "docs", "images");

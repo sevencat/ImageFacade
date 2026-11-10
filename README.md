@@ -68,7 +68,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 | 包 | 后端类 | 三方库 | 说明 |
 |---|---|---|---|
 | [`Sevencat.ImageFacade`](https://www.nuget.org/packages/Sevencat.ImageFacade) | — | 无 | 核心：契约 + 路由 + 排版 + 内置字体 + Pipeline |
-| [`Sevencat.ImageFacade.SdcbSimdCodecs`](https://www.nuget.org/packages/Sevencat.ImageFacade.SdcbSimdCodecs) | `SoftwareBackend` | `Sdcb.SimdCodecs` 2.0 | 纯托管，无原生依赖，**仅 `net10.0`** |
+| [`Sevencat.ImageFacade.SdcbSimdCodecs`](https://www.nuget.org/packages/Sevencat.ImageFacade.SdcbSimdCodecs) | `SoftwareBackend` | `Sdcb.SimdCodecs.Abstractions` 2.0 | 纯托管，无原生依赖，**仅 `net10.0`**；编解码按需接入，见下 |
 | [`Sevencat.ImageFacade.SkiaSharp`](https://www.nuget.org/packages/Sevencat.ImageFacade.SkiaSharp) | `SkiaBackend` | `SkiaSharp` 3.119.1 | 编译目标 3.x，**可提升到 4.x**（4.x 兼容 3.x） |
 | [`Sevencat.ImageFacade.ImageSharp`](https://www.nuget.org/packages/Sevencat.ImageFacade.ImageSharp) | `ImageSharpBackend` | `ImageSharp` 3.1 | 纯托管，格式最全 |
 | [`Sevencat.ImageFacade.ImageSharp2`](https://www.nuget.org/packages/Sevencat.ImageFacade.ImageSharp2) | `ImageSharpBackend` | `ImageSharp` 2.1 | 同上，2.x 分支 |
@@ -85,6 +85,70 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 <RuntimeIdentifier>win-x64</RuntimeIdentifier>
 <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20261107" />
 ```
+
+### 软后端：编解码按需接入
+
+`Sevencat.ImageFacade.SdcbSimdCodecs` **不内置任何编解码器**——它只带 `Sdcb.SimdCodecs.Abstractions`（编解码抽象）和自绘渲染层。要读写什么格式，就引哪几个 `Sdcb.SimdCodecs.Xxx` 包，然后在启动时注册一次。
+
+这样设计是因为格式是可选项：只存 PNG 的服务不该把 WebP / TIFF / JPEG 2000 的代码一起扛进包和内存。注册表是**进程级静态**的，启动时填一次，之后所有 `SoftwareBackend` 实例共享。
+
+| 需要 | 引哪个包 |
+|---|---|
+| PNG | `Sdcb.SimdCodecs.Png` |
+| JPEG | `Sdcb.SimdCodecs.Jpeg` |
+| BMP | `Sdcb.SimdCodecs.Bmp` |
+| GIF | `Sdcb.SimdCodecs.Gif` |
+| WebP | `Sdcb.SimdCodecs.Webp` |
+| TIFF | `Sdcb.SimdCodecs.Tiff` |
+| ICO / CUR | `Sdcb.SimdCodecs.Ico` |
+| QOI / Netpbm | `Sdcb.SimdCodecs.Qoi` / `Sdcb.SimdCodecs.Pnm` |
+| JPEG 2000 / JBIG2（PDF 场景） | `Sdcb.SimdCodecs.Jpeg2000` / `Sdcb.SimdCodecs.Jbig2` |
+| HEIF / HEIC（手机照片） | `Sdcb.SimdCodecs.Heif`，**HEVC 有专利**，需自行评估后再用 |
+
+初始化：在 `Program.cs` 开头或 `[ModuleInitializer]` 里注册一次（`ImageFormat` 是门面的 `ImageFacade.ImageFormat`）：
+
+```csharp
+using ImageFacade.Backends;
+using Sdcb.SimdCodecs.Bmp;
+using Sdcb.SimdCodecs.Jpeg;
+using Sdcb.SimdCodecs.Png;
+
+// 一次注册 = 解码器 + 编码器；第三个参数把门面的 EncodeRequest 映射成该格式的选项
+ImageBackendBase.RegisterCodec(
+    ImageFormat.Png,
+    PngImageDecoder.Registration,
+    PngImageEncoder.Registration);
+
+ImageBackendBase.RegisterCodec(
+    ImageFormat.Jpeg,
+    JpegImageDecoder.Registration,
+    JpegImageEncoder.Registration,
+    request => new JpegEncodeOptions { Quality = Math.Clamp(request.Quality, 1, 100) });
+
+ImageBackendBase.RegisterCodec(
+    ImageFormat.Bmp,
+    BmpImageDecoder.Registration,
+    BmpImageEncoder.Registration,
+    _ => new BmpEncodeOptions());
+```
+
+要点：
+
+- **只注册需要的**：`RegisterDecoder` / `RegisterEncoder` 可以只注册一半（例如服务只产出 JPEG、不读图）。
+- **没注册的格式**：`CanDecode` / `CanEncode` 返回 `false`，`Load` / `Save` 抛 `FeatureNotSupportedException`；**绘制、Resize、文字与编解码无关，照常可用**——完全不注册也能当纯渲染后端。
+- **别把两个 `ImageFormat` 一起 `using`**：门面的是 `ImageFacade.ImageFormat`，`Sdcb.SimdCodecs.Abstractions` 里也有一个同名的，冲突时用别名。
+- **注册是幂等且线程安全的**，但请在启动阶段做一次，别放进请求路径。
+- **AOT 不受影响**：注册表就是普通静态字典，没有反射。
+
+### 背后的编解码库：Sdcb.SimdCodecs
+
+软后端的编解码全部来自 [Sdcb.SimdCodecs](https://github.com/sdcb/SimdCodecs)（MIT）。选它是因为它同时满足了"快""准""零原生依赖"三件在容器 / AOT 场景里很难兼得的事：
+
+- **纯托管、零原生依赖**：Windows / Linux / macOS、NativeAOT、browser-wasm 都能跑，同一份输入在所有目标上输出一致——这对"软后端 = 确定性回退基准"很关键，不会因为换了台机器或镜像，同一张图的字节就变了。
+- **SIMD 加速，但不是只有 SIMD**：AVX2 / SSE / AdvSimd 三条路径 + 标量回退，老 CPU 也能正确跑。
+- **速度和原生库同级**：JPEG 解码 0.82× libjpeg-turbo、PNG 解码 0.88× libpng、WebP 解码 0.53–0.88× libwebp（同机单线程，低于 1.00× 表示更快）。
+- **结果是精确的**：WebP 解码与 libwebp 逐字节一致，PNG 与无损 JPEG 2000 位精确；不会出现"换库后图看起来一样、像素对不上"。
+- **低分配**：可以直接解码进你自己的缓冲区，任意像素布局与任意行 stride（`ImageBackendBase` 走的正是这条路径），JPEG 解码 0 托管分配。
 
 ## 30 秒上手
 
@@ -119,7 +183,7 @@ image.Save("out.png", new SaveOptions { CompressionLevel = 6 });
 ```csharp
 // using ImageFacade.OpenCvSharp; / using ImageFacade.SdcbSimdCodecs;
 using var engine = new ImageEngine(new OpenCvBackend());
-using var engine = new ImageEngine(new SoftwareBackend());    // 纯托管，无原生依赖
+using var engine = new ImageEngine(new SoftwareBackend());    // 纯托管，无原生依赖（编解码要先注册，见上）
 ```
 
 ## 截图
@@ -325,8 +389,8 @@ using Mat copy = image.CloneMat();                           // 深拷贝，改�
 | 虚线（`StrokeStyle.DashPattern`） | ✓ | ✓ | **✗** | ✓ |
 | 文字（含中文） | ✓ | ✓ | ✓ | ✓ |
 | 半透明文字 | ✓ | ✓ | ✓ | ✓ |
-| 解码格式 | PNG/JPEG/BMP/GIF/WebP/ICO | PNG/JPEG/BMP/GIF/WebP/TIFF | PNG/JPEG/BMP/WebP | PNG/JPEG/BMP |
-| 编码格式 | PNG/JPEG/WebP | PNG/JPEG/BMP/GIF/WebP/TIFF | PNG/JPEG/BMP/WebP | PNG/JPEG/BMP |
+| 解码格式 | PNG/JPEG/BMP/GIF/WebP/ICO | PNG/JPEG/BMP/GIF/WebP/TIFF | PNG/JPEG/BMP/WebP | 按注册（Sdcb 格式包） |
+| 编码格式 | PNG/JPEG/WebP | PNG/JPEG/BMP/GIF/WebP/TIFF | PNG/JPEG/BMP/WebP | 按注册（Sdcb 格式包） |
 | NativeAOT | 已声明兼容 | 未声明 | 不支持 | 已声明兼容 |
 | 原生依赖 | SkiaSharp RID 包 | 无 | OpenCV RID 包 | 无 |
 
@@ -370,7 +434,7 @@ dotnet pack  ImageFacade.slnx -c Release -o artifacts/packages
 ```
 src/
   ImageFacade/                     # 核心：契约 + 路由 + 排版 + 内置字体 + Pipeline
-  ImageFacade.SdcbSimdCodecs/      # 软后端：ImgProcSharp 渲染层 + Sdcb.SimdCodecs 编解码
+  ImageFacade.SdcbSimdCodecs/      # 软后端：ImgProcSharp 渲染层 + 可插拔编解码（只引 Abstractions）
   ImageFacade.SkiaSharp/           # SkiaSharp 3.119（编译目标，兼容 4.x）
   ImageFacade.ImageSharp/          # ImageSharp 3.x + Drawing 2.x
   ImageFacade.ImageSharp2/         # ImageSharp 2.x + Drawing 1.x（链接上一份源码）

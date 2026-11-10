@@ -6,7 +6,11 @@ namespace ImageFacade.SdcbSimdCodecs;
 
 /// <summary>
 /// 软后端（回退基准，也可独立当主角）：绘制 / Resize / 文字来自复制改造的 ImgProcSharp 渲染层，
-/// 编解码来自 <see cref="ImageBackendBase"/>（Sdcb.SimdCodecs 2.0）。
+/// 编解码来自 <see cref="ImageBackendBase"/>，但**本包不自带任何格式**——使用方引
+/// <c>Sdcb.SimdCodecs.Xxx</c>（Png / Jpeg / Bmp / Gif / Webp / Tiff …）后调用
+/// <see cref="ImageBackendBase.RegisterCodec"/> 注册，注册方式见 README「软后端：按需接入编解码」。
+/// 完全不注册时，绘制 / Resize / 文字照常可用，只有 Load / Save 会抛
+/// <see cref="FeatureNotSupportedException"/>。
 /// </summary>
 public sealed class SoftwareBackend : ImageBackendBase
 {
