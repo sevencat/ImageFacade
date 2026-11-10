@@ -6,17 +6,22 @@
     <AssemblyName>ImageFacade.Samples</AssemblyName>
     <RootNamespace>ImageFacade.Samples</RootNamespace>
     <IsPackable>false</IsPackable>
+    <!-- OpenCvSharp 通过 RID 包带出原生库 -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
     <ProjectReference Include="..\..\src\ImageFacade.SdcbSimdCodecs\ImageFacade.SdcbSimdCodecs.csproj" />
     <ProjectReference Include="..\..\src\ImageFacade.SkiaSharp\ImageFacade.SkiaSharp.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.ImageSharp\ImageFacade.ImageSharp.csproj" />
+    <ProjectReference Include="..\..\src\ImageFacade.OpenCvSharp\ImageFacade.OpenCvSharp.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 示例跑在本机，需要原生 Skia 库；适配包本身不引（plan §6.2） -->
+    <!-- 示例跑在本机，需要原生库；适配包本身不引（plan §6.2） -->
     <PackageReference Include="SkiaSharp.NativeAssets.Win32" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" />
   </ItemGroup>
 
 </Project>

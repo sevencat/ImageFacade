@@ -1,108 +1,77 @@
+<div align="center">
+
 # ImageFacade
 
-一套与后端无关的图像处理 API：调用方只依赖 `ImageEngine` + `FacadeImage`，换一行构造代码就能在 **SkiaSharp / OpenCvSharp / ImageSharp / 纯托管软渲染** 之间切换，其余代码不变。
+**一套与后端无关的图像处理 API**。换一行构造代码，就能在 SkiaSharp / OpenCvSharp / ImageSharp / 纯托管软渲染之间切换，其余代码一个字都不用改。
 
-面向两个场景：视频帧的检测叠加（BGR24 进、Bgra32 出，稳定态不产生临时大对象），以及服务端批量出图（纯托管、无原生依赖可选用软后端）。
+<p>
+  <img alt=".NET" src="https://img.shields.io/badge/.NET-net8.0%20%7C%20net10.0-512BD4">
+  <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-180%20passed-brightgreen">
+  <img alt="Backends" src="https://img.shields.io/badge/backends-4-9cf">
+</p>
 
-七个包同版本发布到 NuGet，见 [引用方式](#引用方式)。第三方库（SkiaSharp / OpenCvSharp / ImageSharp / Sdcb）一律 `PackageReference` 传递，不随本库打包。
+</div>
+
+![Resize 六模式对比](docs/images/resize-modes.png)
 
 ---
 
-## 状态
+## 为什么
 
-| 部分 | 状态 |
+图像处理的库很多，但它们的 API 互不兼容：换一个后端，`Resize`、画笔、文字排版、像素布局全都要重写一遍。项目一旦因为许可证、平台、部署形态（容器 / AOT / 无原生依赖）不得不换库，改动面通常是整个业务层。
+
+ImageFacade 把这层差异收在 `IImageBackend` 后面：
+
+- **调用方只依赖一个门面**：`ImageEngine` + `FacadeImage`。
+- **后端互不兜底**：支持的能力原生执行，不支持的直接抛 `FeatureNotSupportedException`（带后端名与能力名）。没有隐藏的性能悬崖，也没有"看起来一样其实不一样"的输出。
+- **六个工程覆盖三个主版本组合**：SkiaSharp 4、OpenCvSharp 4/5、ImageSharp 2/3，一份源码，不复制实现。
+- **中文开箱可用**：核心包内置文泉驿微米黑，容器 / CI / NativeAOT 环境下不需要准备任何字体。
+
+## 特性
+
+| | |
 |---|---|
-| 核心契约、路由、Resize 六模式、排版/测量、像素互操作、异步加载保存 | 已实现 |
-| `ImageFacade.SdcbSimdCodecs`（软后端） | 已实现（全能力） |
-| SkiaSharp 适配（编译目标 3.119.1，可提升到 4.x） | 已实现 |
-| ImageSharp 3.1 / 2.1 适配 | 已实现 |
-| OpenCvSharp 4.13 / 5.0 适配 | 已实现 |
-| `ImageFacade.Pipeline`（letterbox、张量化、NMS、检测框绘制，**在核心包内**，不单独成包） | 已实现 |
-| 跨后端一致性套件、benchmark、CI | 未实现 |
+| **绘制** | 点、线、折线、矩形、椭圆、多边形，描边与填充；虚线；半透明叠加 |
+| **文字** | 字号 / 颜色 / 字体；左中右对齐；`MaxWidth` 自动换行；`MeasureText` 与绘制使用同一套排版 |
+| **缩放** | `Stretch` / `Max` / `Min` / `Crop` / `Pad` / `BoxPad` 六种模式，一次性完成"缩放 + 补边 / 裁切" |
+| **像素互操作** | `Bgra32` / `Bgr24` / `Rgb24` / `Gray8` 直接进出，支持任意 `stride`，不强制行连续 |
+| **检测流水线** | letterbox + 坐标反算、NCHW/NHWC 张量化、池化缓冲、NMS、检测框与标签绘制 |
+| **异步** | 加载 / 保存 / 编码有 `Async` 版本；绘制保持同步（微秒级，包一层 Task 只会更慢） |
+| **AOT** | 核心与软后端声明 `IsAotCompatible`，无反射、无动态代码生成 |
 
----
-
-## 目录结构
-
-```
-src/
-  ImageFacade/                     # 核心：契约 + 路由 + 排版 + 内置字体，无编解码依赖
-  ImageFacade.SdcbSimdCodecs/      # 软后端：ImgProcSharp 渲染层 + Sdcb.SimdCodecs 编解码
-  ImageFacade.SkiaSharp/           # SkiaSharp 3.119（编译目标，兼容 4.x）
-  ImageFacade.ImageSharp/          # ImageSharp 3.x + Drawing 2.x
-  ImageFacade.ImageSharp2/         # ImageSharp 2.x + Drawing 1.x（链接上一份源码）
-  ImageFacade.OpenCvSharp/         # OpenCvSharp4
-  ImageFacade.OpenCvSharp5/        # OpenCvSharp5（链接上一份源码）
-tests/                             # 一后端一测试工程，共享测试源码
-samples/ImageFacade.Samples/       # 冒烟示例：同一份绘制代码跑软后端与 Skia
-```
-
----
-
-## 包 ↔ 三方库版本
-
-| 包 | 后端类 | 三方库 |
-|---|---|---|
-| `ImageFacade` | — | 无（仅 BCL + 内置字体） |
-| `ImageFacade.SdcbSimdCodecs` | `SoftwareBackend` | `Sdcb.SimdCodecs` 2.0.0（**仅 `net10.0`**） |
-| `ImageFacade.SkiaSharp` | `SkiaBackend` | `SkiaSharp` 3.119.1（可提升到 4.x） |
-| `ImageFacade.ImageSharp` | `ImageSharpBackend` | `ImageSharp` 3.1.12 + `Drawing` 2.1.3 |
-| `ImageFacade.ImageSharp2` | `ImageSharpBackend` | `ImageSharp` 2.1.13 + `Drawing` 1.0.0 |
-| `ImageFacade.OpenCvSharp` | `OpenCvBackend` | `OpenCvSharp4` 4.13.0.20261107 |
-| `ImageFacade.OpenCvSharp5` | `OpenCvBackend` | `OpenCvSharp5` 5.0.0.20261109 |
-
-无后缀 = 当前主版本；带数字 = 指定的另一主版本。**同一进程只能绑定一个三方库主版本**，所以 `ImageSharp` / `ImageSharp2` 只能二选一，`OpenCvSharp` / `OpenCvSharp5` 同理。
-
-SkiaSharp 只有一个工程，**编译目标是 3.119.1**，只使用 3.x 就有的 API。4.x 保留了这些成员（`SKPath` 写 API 与 4 参 `DrawBitmap` 只是标记为过时，没有删除），所以：
-
-- 你的项目用 SkiaSharp 3.x → 直接工作；
-- 你的项目用 SkiaSharp 4.x → NuGet 版本提升到 4.x，同样工作（已实测 4.155.0）；
-- 反过来（库用 4.x 编译、项目锁 3.x）不行。
-
-详见 plan.md 第 6.2 节。
-
-目标框架：`net8.0;net10.0`（`ImageFacade.SdcbSimdCodecs` 因依赖只有 `net10.0` 资产，为单目标 `net10.0`）。
-
----
-
-## 引用方式
-
-核心包永远要引，再按需要加一个后端包：
+## 安装
 
 ```xml
-<ItemGroup>
-  <PackageReference Include="ImageFacade" Version="0.1.0" />
-  <PackageReference Include="ImageFacade.SkiaSharp" Version="0.1.0" />
-</ItemGroup>
+<!-- 核心包永远要引，再按需加一个后端 -->
+<PackageReference Include="ImageFacade" Version="0.1.0" />
+<PackageReference Include="ImageFacade.SkiaSharp" Version="0.1.0" />
 ```
 
-后端包已经带上了对应三方库的依赖，不需要重复声明 `SkiaSharp` / `OpenCvSharp4` / `SixLabors.ImageSharp`。
+后端包已带上对应三方库的依赖，不需要重复声明 `SkiaSharp` / `OpenCvSharp4` / `SixLabors.ImageSharp`。
 
-在本仓库内开发时用 `ProjectReference`：
+| 包 | 后端类 | 三方库 | 说明 |
+|---|---|---|---|
+| `ImageFacade` | — | 无 | 核心：契约 + 路由 + 排版 + 内置字体 + Pipeline |
+| `ImageFacade.SdcbSimdCodecs` | `SoftwareBackend` | `Sdcb.SimdCodecs` 2.0 | 纯托管，无原生依赖，**仅 `net10.0`** |
+| `ImageFacade.SkiaSharp` | `SkiaBackend` | `SkiaSharp` 3.119.1 | 编译目标 3.x，**可提升到 4.x**（4.x 兼容 3.x） |
+| `ImageFacade.ImageSharp` | `ImageSharpBackend` | `ImageSharp` 3.1 | 纯托管，格式最全 |
+| `ImageFacade.ImageSharp2` | `ImageSharpBackend` | `ImageSharp` 2.1 | 同上，2.x 分支 |
+| `ImageFacade.OpenCvSharp` | `OpenCvBackend` | `OpenCvSharp4` 4.13 | BGRA Mat 直接进出 |
+| `ImageFacade.OpenCvSharp5` | `OpenCvBackend` | `OpenCvSharp5` 5.0 | 同上，5.x 分支 |
+
+无后缀 = 当前主版本；带数字 = 指定的另一主版本。**同一进程只能绑定一个三方库主版本**，所以 `ImageSharp` / `ImageSharp2` 只能二选一。
+
+原生库按 RID 由应用侧引用，适配包不钉死 RID：
 
 ```xml
-<ItemGroup>
-  <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
-  <ProjectReference Include="..\ImageFacade.SkiaSharp\ImageFacade.SkiaSharp.csproj" />
-</ItemGroup>
-```
-
-原生库按 RID 由**应用侧**引用（适配包不钉死 RID）：
-
-```xml
-<!-- Skia -->
-<!-- 版本必须与项目解析到的 SkiaSharp 托管包一致：3.119.1 或 4.155.0 -->
 <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.119.1" />
-<!-- OpenCV：必须设 RuntimeIdentifier -->
+<!-- OpenCV 必须设 RuntimeIdentifier -->
 <RuntimeIdentifier>win-x64</RuntimeIdentifier>
 <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20261107" />
 ```
 
-软后端 (`ImageFacade.SdcbSimdCodecs`) 无原生依赖，适合容器、AOT、精简运行时。
-
----
-
-## 快速开始
+## 30 秒上手
 
 ```csharp
 using ImageFacade;
@@ -118,7 +87,6 @@ image.Resize(new ResizeOptions
          Sampler = Sampler.Lanczos3,
      })
      .DrawLine(new PointF(20, 20), new PointF(300, 20), Rgba32.Red, width: 3)
-     .DrawPoint(new PointF(300, 120), Rgba32.Orange, radius: 6)
      .DrawText("你好 ImageFacade", new PointF(40, 240), new TextStyle
      {
          Font = FontRef.BuiltIn,
@@ -135,43 +103,44 @@ image.Save("out.png", new SaveOptions { CompressionLevel = 6 });
 
 ```csharp
 // using ImageFacade.OpenCvSharp; / using ImageFacade.SdcbSimdCodecs;
-using var engine = new ImageEngine(new OpenCvBackend());      // 其余代码完全不变
+using var engine = new ImageEngine(new OpenCvBackend());
 using var engine = new ImageEngine(new SoftwareBackend());    // 纯托管，无原生依赖
 ```
 
-### 视频帧：原生内存进出
+## 截图
 
-```csharp
-// 指针来自 ffmpeg 的 avFrame->data[0] 与 avFrame->linesize[0]（或相机缓冲），
-// 不先转 RGBA，直接按 BGR24 + stride 包一层。
-IntPtr pixels = frameDataPtr;
-int    stride = linesize;
+**同一段代码，四个后端**（software / skia / imagesharp / opencv）：
 
-using var frame = engine.FromPixels(pixels, width, height, stride, PixelFormat.Bgr24);
+![四后端对比](docs/images/backend-comparison.png)
 
-frame.DrawRectangle(new RectF(100, 80, 220, 160), Rgba32.Lime, width: 2);
+| 文字排版 | 检测流水线 |
+|---|---|
+| ![文字排版](docs/images/text-layout.png) | ![检测流水线](docs/images/pipeline-detection.png) |
 
-// 直接写进 Avalonia 的 WriteableBitmap 锁帧内存
-frame.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);
-```
+| 水印叠加 | 基础绘制 |
+|---|---|
+| ![水印](docs/images/watermark.png) | ![基础绘制](docs/images/basic-skia.png) |
 
-`stride` 由调用方给出，按行处理、不要求连续；格式缺省是 `Rgba32`，`Bgr24` / `Bgra32` / `Rgb24` / `Gray8` 需显式指定。
+以上图片全部由 `samples/ImageFacade.Samples` 生成（`dotnet run` 输出到 `docs/images/`），可以直接改代码看效果。检测流水线那张里的**虚线框是 NMS 抑制掉的候选框**，实线是保留的。
 
-### 异步
+## Resize 六模式
 
-只有 I/O + 编解码有异步版本，绘制与测量保持同步（微秒级）：
+上图（顶部那张）就是同一张 800×300 源图跑六种模式的结果：
 
-```csharp
-using var image = await engine.LoadAsync("in.jpg", cancellationToken: ct);
-await image.SaveAsync("out.webp", new SaveOptions { Quality = 85 }, ct);
-byte[] bytes = await image.EncodeAsync(cancellationToken: ct);
-```
+| 模式 | 行为 | 输出尺寸 |
+|---|---|---|
+| `Stretch` | 直接拉伸，不保持比例 | 目标尺寸 |
+| `Max` | 等比缩放到**完全放进**目标框 | 缩放后尺寸 |
+| `Min` | 等比缩放到**覆盖**目标框 | 缩放后尺寸 |
+| `Crop` | 等比铺满后居中裁切 | 目标尺寸 |
+| `Pad` | 等比放进后补边 | 目标尺寸 |
+| `BoxPad` | 先裁到目标比例再缩放，四角对齐 | 目标尺寸 |
 
----
+`Max` / `Min` 的命名沿用 .NET 与 SixLabors 的习惯：`Max` 是"最大尺寸不超过目标框"。
 
 ## 检测流水线
 
-`ImageFacade.Pipeline` 在核心包内，不依赖任何推理库：它只负责"把帧变成模型输入"和"把模型输出画回帧"这两段，中间跑什么模型由你决定。
+`ImageFacade.Pipeline` 在核心包内，不依赖任何推理库：它只负责"把帧变成模型输入"和"把模型输出画回帧"，中间跑什么模型由你决定。
 
 ```csharp
 using ImageFacade;
@@ -212,15 +181,30 @@ frame.DrawDetections(onSource);
 - `Apply` **不改源图**，所以画框可以直接画在源帧上，坐标不用二次换算。
 - `LetterboxInfo.ToSource` 是唯一的反算入口；手写 `(x - pad) / scale` 容易把顺序写反。
 - 张量缓冲用 `TensorBuffer.Rent` 池化：640×640×3 是 4.9 MB，每帧新分配会直接进 LOH。
-- `Nms.Suppress` 是原地的：返回保留数量，有效段是 `detections[..kept]`，结果与输入顺序无关；`Nms.Select` 则返回原数组下标。
-- `DrawDetections` 只是默认排版，标签宽度走 `MeasureText`，因此与当前后端的字体度量自洽；要别的排版就自己循环 `DrawRectangle` + `FillRectangle` + `DrawText`。
+- `Nms.Suppress` 原地重排，有效段是 `detections[..kept]`，结果与输入顺序无关；`Nms.Select` 返回原数组下标。
+- `DrawDetections` 只是默认排版，标签宽度走 `MeasureText`，与当前后端自洽；要别的排版就自己循环 `DrawRectangle` + `FillRectangle` + `DrawText`。
 - OpenCV 后端不支持半透明形状：`DetectionStyle.LabelBackground` 默认的 `(0,0,0,160)` 会抛 `FeatureNotSupportedException`，需要改成不透明色。
 
-完整可运行的版本在 `samples/ImageFacade.Samples`（`RunPipeline`），输出 `artifacts/pipeline-skia.png`。
+## 视频帧：原生内存进出
+
+```csharp
+// 指针来自 ffmpeg 的 avFrame->data[0] 与 linesize[0]（或相机缓冲），不先转 RGBA。
+IntPtr pixels = frameDataPtr;
+int    stride = linesize;
+
+using var frame = engine.FromPixels(pixels, width, height, stride, PixelFormat.Bgr24);
+
+frame.DrawRectangle(new RectF(100, 80, 220, 160), Rgba32.Lime, width: 2);
+
+// 直接写进 Avalonia 的 WriteableBitmap 锁帧内存
+frame.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);
+```
+
+`stride` 由调用方给出，按行处理、不要求连续；格式缺省是 `Rgba32`，`Bgr24` / `Bgra32` / `Rgb24` / `Gray8` 需显式指定。
 
 ## 后端能力矩阵
 
-`✓` 原生支持；`✗` 不支持，调用时抛 `FeatureNotSupportedException`（消息含后端名与能力名）；`—` 不适用。
+`✓` 原生支持；`✗` 不支持，调用时抛 `FeatureNotSupportedException`（消息含后端名与能力名）。
 
 | 能力 | Skia | ImageSharp | OpenCV | 软后端 |
 |---|:---:|:---:|:---:|:---:|
@@ -235,11 +219,15 @@ frame.DrawDetections(onSource);
 | NativeAOT | 已声明兼容 | 未声明 | 不支持 | 已声明兼容 |
 | 原生依赖 | SkiaSharp RID 包 | 无 | OpenCV RID 包 | 无 |
 
-OpenCV 后端没有 alpha 混合与 stroke pattern：需要半透明叠加或虚线时换 Skia / ImageSharp / 软后端，或把颜色改成不透明的。这一限制来自 OpenCV 的 drawing 函数本身，不是适配实现的选择。详见 [misc.md](misc.md) 第 E 节。
+OpenCV 后端没有 alpha 混合与 stroke pattern——这两条限制来自 OpenCV 的 drawing 函数本身，不是适配实现的选择。需要半透明叠加或虚线时换 Skia / ImageSharp / 软后端。
 
 **跨后端不保证逐像素一致**：抗锯齿、字体栅格化、缩放核的实现各不相同。需要确定性输出时把软后端当主后端。
 
----
+## 中文与字体
+
+- 核心内置文泉驿微米黑（`FontRef.BuiltIn`），**没有系统字体也能画中文**；容器 / CI / AOT 场景不需要额外准备字体。
+- 系统字体族（`FontRef.Family(...)`）只有 Skia 与 ImageSharp 支持；OpenCV 与软后端没有系统字体管理器，会退回内置字体。
+- 自备字体：`Font.Load*` 拿到实例后塞进 `TextStyle.FontFace`，可跨多次绘制复用。
 
 ## 出错时
 
@@ -252,38 +240,41 @@ OpenCV 后端没有 alpha 混合与 stroke pattern：需要半透明叠加或虚
 
 路由只有两档：后端 `Try*` 返回 `true` 就原生执行，返回 `false` 就抛错。**没有跨后端自动回退**，行为在调用点可见。
 
----
-
-## 中文与字体
-
-- 核心内置文泉驿微米黑（`FontRef.BuiltIn`），**没有系统字体也能画中文**；容器 / CI / AOT 场景不需要额外准备字体。
-- 系统字体族（`FontRef.Family(...)`）只有 Skia 与 ImageSharp 支持；OpenCV 与软后端没有系统字体管理器，会退回内置字体。
-- 自备字体：`Font.Load*` 拿实例后塞进 `TextStyle.FontFace`，可跨多次绘制复用。
-- `MeasureText` 与 `DrawText` 使用同一套排版结果，同一后端内自洽。
-
----
-
 ## 构建与测试
 
 ```powershell
 dotnet build ImageFacade.slnx
 dotnet test  ImageFacade.slnx          # win-x64
+dotnet pack  ImageFacade.slnx -c Release -o artifacts/packages
 ```
 
 - 测试按主版本拆分工程（同一进程只能绑一个三方库版本），OpenCV 测试工程需 `RuntimeIdentifier=win-x64`。
 - v1 只在 **win-x64** 验收；Linux/macOS 只保证核心与纯托管后端可编译。
+- CI 见 `.github/workflows/ci.yml`：Windows + .NET 10，跑 build → test → pack。
 
----
+## 项目结构
+
+```
+src/
+  ImageFacade/                     # 核心：契约 + 路由 + 排版 + 内置字体 + Pipeline
+  ImageFacade.SdcbSimdCodecs/      # 软后端：ImgProcSharp 渲染层 + Sdcb.SimdCodecs 编解码
+  ImageFacade.SkiaSharp/           # SkiaSharp 3.119（编译目标，兼容 4.x）
+  ImageFacade.ImageSharp/          # ImageSharp 3.x + Drawing 2.x
+  ImageFacade.ImageSharp2/         # ImageSharp 2.x + Drawing 1.x（链接上一份源码）
+  ImageFacade.OpenCvSharp/         # OpenCvSharp4
+  ImageFacade.OpenCvSharp5/        # OpenCvSharp5（链接上一份源码）
+tests/                             # 一后端一测试工程，共享测试源码
+samples/ImageFacade.Samples/       # 示例 + README 截图生成器
+docs/images/                       # 截图
+```
 
 ## 文档
 
 | 文件 | 内容 |
 |---|---|
-| [plan.md](plan.md) | 设计、公开 API 草案、SPI、里程碑、验收标准、性能目标 |
+| [plan.md](plan.md) | 设计、公开 API、SPI、里程碑、验收标准、性能目标 |
 | [misc.md](misc.md) | 决策记录、许可证矩阵、逐库的坑、测试策略、已否决方案、落地记录（§Z） |
 | [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) | 第三方组件与许可证清单 |
-
----
 
 ## 许可证
 

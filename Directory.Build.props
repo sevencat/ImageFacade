@@ -25,11 +25,13 @@
     <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
   </PropertyGroup>
 
-  <!-- 每个包都带：README（安装/能力表/许可证提示）、第三方声明、随源码分发的许可证 -->
+  <!-- 每个包都带：README（安装/能力表/许可证提示）、第三方声明、随源码分发的许可证。
+       docs/images 一起打进去，否则 NuGet 页面上 README 的截图会裂。 -->
   <ItemGroup>
     <None Include="$(RepoRoot)README.md" Pack="true" PackagePath="\" Visible="false" />
     <None Include="$(RepoRoot)THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" Visible="false" />
     <None Include="$(RepoRoot)licenses\*" Pack="true" PackagePath="licenses\" Visible="false" />
+    <None Include="$(RepoRoot)docs\images\*" Pack="true" PackagePath="docs\images\" Visible="false" />
   </ItemGroup>
 
 </Project>

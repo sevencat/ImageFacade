@@ -1112,6 +1112,10 @@ f:/code/ImageFacade/
   Directory.Packages.props         # 集中包版本（CPM；旧主版本用 VersionOverride）
   LICENSE  THIRD-PARTY-NOTICES.txt  README.md  plan.md  misc.md
   licenses/                        # 随源码分发的第三方资源许可证（内置字体等）
+  docs/images/                     # README 截图，由 samples 生成，随包分发
+  .github/workflows/ci.yml         # Windows + .NET 10：build → test → pack
+  samples/ImageFacade.Samples/     # 示例 + 截图生成器（basic / resize / text / watermark / pipeline）
+  benchmarks/                      # BenchmarkDotNet（M9 待落地，目录尚未创建）
   src/
     ImageFacade/                   # net8.0;net10.0，轻量核心（无编解码依赖）
       Abstractions/{Rgba32,PointF,Size,SizeF,RectF,PixelFormat,ImageFormat,ImageMetadata}.cs
@@ -1131,23 +1135,19 @@ f:/code/ImageFacade/
       SoftwareBackend.cs                  # 继承 Base + 渲染
       Rendering/**                        # 复制并改造的 ImgProcSharp Core（internal）
       ImageFacade.SdcbSimdCodecs.csproj
-  src/
     ImageFacade.SkiaSharp/         # SkiaSharp 3.119.1 编译目标（4.x 兼容）+ SkiaBackend.cs
     ImageFacade.OpenCvSharp/       # OpenCvSharp4 4.13（当前）+ OpenCvBackend.cs
     ImageFacade.OpenCvSharp5/      # OpenCvSharp5 5.0，链接 OpenCvSharp 工程的源码
     ImageFacade.ImageSharp/        # ImageSharp 3.1.12 + Drawing 2.1.3（当前）+ ImageSharpBackend.cs
     ImageFacade.ImageSharp2/       # ImageSharp 2.1.13 + Drawing 1.0.0，链接 ImageSharp 工程的源码
   tests/
-    ImageFacade.Tests/             # 路由/抛出/排版/Resize/NMS/letterbox（FakeBackend + Skia + ImageSharp）
+    ImageFacade.Tests/             # 路由/抛出/排版/Resize/Pipeline（FakeBackend + Skia + ImageSharp）
     ImageFacade.ImageSharp3.Tests/ # ImageSharp 3.x 后端（源码在这里）
     ImageFacade.ImageSharp2.Tests/ # ImageSharp 2.x，链接上面那份测试源码
+    ImageFacade.OpenCv4.Tests/     # OpenCvSharp4；需 RuntimeIdentifier=win-x64
+    ImageFacade.OpenCv5.Tests/     # OpenCvSharp5，链接上面那份测试源码
     ImageFacade.SdcbSimdCodecs.Tests/  # 软后端独立测试（唯一引用软后端的测试项目）
-    ImageFacade.Conformance.Software.Tests/   # 后续里程碑：全量一致性套件
-    ImageFacade.Conformance.Skia4.Tests/
-    ImageFacade.Conformance.OpenCv4.Tests/
-    ImageFacade.Conformance.OpenCv5.Tests/
-  samples/
-    ImageFacade.Samples/           # 当前版本四后端对比 + BGR24 帧 → 检测 → Bgra32 流水线
+    ImageFacade.Conformance.*.Tests/   # 后续里程碑：全量一致性套件（尚未创建）
   benchmarks/
     ImageFacade.Benchmarks/        # BenchmarkDotNet
 ```
