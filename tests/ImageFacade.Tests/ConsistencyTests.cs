@@ -1,6 +1,5 @@
-using ImageFacade.Backends;
+﻿using ImageFacade.Backends;
 using ImageFacade.SkiaSharp;
-using ImageFacade.SdcbSimdCodecs;
 using Xunit;
 
 namespace ImageFacade.Tests;
@@ -12,7 +11,6 @@ public sealed class ConsistencyTests
 {
     private static readonly (string Name, Func<IImageBackend> Factory)[] Backends =
     [
-        ("software", static () => new SoftwareBackend()),
         ("skia", static () => new SkiaBackend()),
     ];
 
@@ -57,7 +55,7 @@ public sealed class ConsistencyTests
 
     private static Snapshot Render(IImageBackend backend)
     {
-        using var engine = new ImageEngine(backend, new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        using var engine = new ImageEngine(backend);
         using FacadeImage image = engine.Create(200, 120, Rgba32.White);
 
         image
@@ -129,7 +127,7 @@ public sealed class ConsistencyTests
     {
         foreach ((string name, Func<IImageBackend> factory) in Backends)
         {
-            using var engine = new ImageEngine(factory(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+            using var engine = new ImageEngine(factory());
             using FacadeImage image = engine.Create(100, 50, Rgba32.White);
 
             image.Resize(new ResizeOptions { Width = 60, Height = 60, Mode = ResizeMode.Pad, PadColor = Rgba32.Red });
@@ -146,7 +144,7 @@ public sealed class ConsistencyTests
     {
         foreach ((string name, Func<IImageBackend> factory) in Backends)
         {
-            using var engine = new ImageEngine(factory(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+            using var engine = new ImageEngine(factory());
             using FacadeImage image = engine.Create(8, 8, null);
             image.FillRectangle(new RectF(0, 0, 4, 8), Rgba32.Red);
 

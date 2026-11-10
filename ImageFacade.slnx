@@ -15,6 +15,7 @@
     <Project Path="tests/ImageFacade.ImageSharp2.Tests/ImageFacade.ImageSharp2.Tests.csproj" />
     <Project Path="tests/ImageFacade.OpenCv4.Tests/ImageFacade.OpenCv4.Tests.csproj" />
     <Project Path="tests/ImageFacade.OpenCv5.Tests/ImageFacade.OpenCv5.Tests.csproj" />
+    <Project Path="tests/ImageFacade.SdcbSimdCodecs.Tests/ImageFacade.SdcbSimdCodecs.Tests.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/ImageFacade.Samples/ImageFacade.Samples.csproj" />

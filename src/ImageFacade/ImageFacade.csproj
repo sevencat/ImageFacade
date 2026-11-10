@@ -17,8 +17,10 @@
   <ItemGroup>
     <!-- 单测要直接测 ResizePlanner / TextLayouter -->
     <InternalsVisibleTo Include="ImageFacade.Tests" />
-    <!-- 托管文字后端直接用字形光栅化结果（Font.Layout / GlyphMask / TextLayout） -->
+    <!-- 托管文字后端直接用字形光栅化结果（Font.Layout / GlyphMask / TextLayout）：
+         软后端独立实现自己的渲染，OpenCV 4/5 两份源码各编一遍 -->
     <InternalsVisibleTo Include="ImageFacade.SdcbSimdCodecs" />
+    <InternalsVisibleTo Include="ImageFacade.OpenCvSharp" />
     <InternalsVisibleTo Include="ImageFacade.OpenCvSharp5" />
   </ItemGroup>
 

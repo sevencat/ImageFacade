@@ -1,14 +1,14 @@
-using ImageFacade.Backends;
+﻿using ImageFacade.Backends;
 using ImageFacade.SdcbSimdCodecs;
 using Xunit;
 
-namespace ImageFacade.Tests;
+namespace ImageFacade.SdcbSimdCodecs.Tests;
 
 /// <summary>软后端（复制改造的 ImgProcSharp 渲染层）的端到端行为。</summary>
 public sealed class SoftwareBackendTests
 {
     private static ImageEngine CreateEngine()
-        => new(new SoftwareBackend(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        => new(new SoftwareBackend());
 
     [Fact]
     public void Create_And_GetPixel_RoundTrips_Straight_Rgba()

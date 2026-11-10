@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -21,8 +21,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
-    <ProjectReference Include="..\..\src\ImageFacade.SdcbSimdCodecs\ImageFacade.SdcbSimdCodecs.csproj" />
     <ProjectReference Include="..\..\src\ImageFacade.SkiaSharp\ImageFacade.SkiaSharp.csproj" />
+    <!-- BMP 等 Skia 后端未实现的编码格式用 ImageSharp 覆盖 -->
+    <ProjectReference Include="..\..\src\ImageFacade.ImageSharp\ImageFacade.ImageSharp.csproj" />
   </ItemGroup>
 
 </Project>

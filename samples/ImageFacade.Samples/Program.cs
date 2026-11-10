@@ -13,10 +13,7 @@ Console.WriteLine("ok");
 
 static async Task RunAsync(IImageBackend backend, string label)
 {
-    using var engine = new ImageEngine(backend, new ImageEngineOptions
-    {
-        Fallback = FallbackMode.Disabled,   // 缺能力就报错，别掩盖问题
-    });
+    using var engine = new ImageEngine(backend);
 
     using var image = engine.Create(800, 450, Rgba32.White);
 

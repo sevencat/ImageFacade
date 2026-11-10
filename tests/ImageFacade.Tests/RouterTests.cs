@@ -1,259 +1,170 @@
-using ImageFacade.Backends;
+﻿using ImageFacade.Backends;
 using Xunit;
 
 namespace ImageFacade.Tests;
 
+/// <summary>路由：后端能做就做，做不了直接抛 <see cref="FeatureNotSupportedException"/>（没有回退）。</summary>
 public sealed class RouterTests
 {
+    private static ImageEngine CreateEngine(FakeBackend backend) => new(backend);
+
     [Fact]
-    public void Native_Success_Does_Not_Fall_Back()
+    public void Native_Success_Does_Not_Throw()
     {
-        var events = new List<FallbackEvent>();
-        var native = new FakeBackend("native");
-        var software = new FakeBackend("software");
-
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            OnFallback = events.Add,
-        });
-
+        var backend = new FakeBackend("native");
+        using var engine = CreateEngine(backend);
         using FacadeImage image = engine.Create(40, 40, Rgba32.White);
+
         image.DrawLine(new PointF(0, 0), new PointF(39, 39), Rgba32.Black);
 
-        Assert.Empty(events);
-        Assert.Equal(1, native.DrawLineCalls);
-        Assert.Equal(0, software.DrawLineCalls);
-        Assert.Equal(0, image.FallbackCount);
+        Assert.Equal(1, backend.DrawLineCalls);
+        Assert.Equal("native", image.BackendName);
     }
 
     [Fact]
-    public void Text_Falls_Back_PerOperation_And_Keeps_Native_Backend()
+    public void Unsupported_Text_Throws_With_Feature_And_Backend()
     {
-        var events = new List<FallbackEvent>();
-        var native = new FakeBackend("native") { SupportsText = false };
-        var software = new FakeBackend("software") { SupportsText = true };
-
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            Fallback = FallbackMode.PerOperation,
-            OnFallback = events.Add,
-        });
-
+        var backend = new FakeBackend("native") { SupportsText = false };
+        using var engine = CreateEngine(backend);
         using FacadeImage image = engine.Create(80, 40, Rgba32.White);
-        image.DrawText("hi", new PointF(2, 2), new TextStyle { Size = 10 });
-
-        Assert.Single(events);
-        Assert.Equal("native", events[0].FromBackend);
-        Assert.Equal("software", events[0].ToBackend);
-        Assert.Equal("DrawText", events[0].Feature);
-        Assert.Equal("native", image.BackendName);
-        Assert.Equal(1, image.FallbackCount);
-        Assert.Equal(1, software.DrawTextCalls);
-
-        // 文字确实落在原后端的帧上（白底上出现墨迹）
-        Assert.Equal(Rgba32.Black, image.GetPixel(3, 3));
-    }
-
-    [Fact]
-    public void Adaptive_Switches_After_Threshold()
-    {
-        var events = new List<FallbackEvent>();
-        var native = new FakeBackend("native") { SupportsText = false };
-        var software = new FakeBackend("software") { SupportsText = true };
-
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            Fallback = FallbackMode.Adaptive,
-            AdaptiveThreshold = 3,
-            OnFallback = events.Add,
-        });
-
-        using FacadeImage image = engine.Create(80, 40, Rgba32.White);
-        var style = new TextStyle { Size = 10 };
-
-        image.DrawText("a", new PointF(0, 0), style);
-        Assert.Equal("native", image.BackendName);
-
-        image.DrawText("b", new PointF(0, 12), style);
-        Assert.Equal("native", image.BackendName);
-
-        image.DrawText("c", new PointF(0, 24), style);
-        Assert.Equal("software", image.BackendName);
-
-        Assert.Equal(3, events.Count);
-        Assert.Equal(3, image.FallbackCount);
-
-        // 切换之后再画文字已原生，不再产生回退
-        image.DrawText("d", new PointF(0, 36), style);
-        Assert.Equal(3, events.Count);
-        Assert.Equal(4, software.DrawTextCalls);
-    }
-
-    [Fact]
-    public void Adaptive_Count_Resets_Per_Image()
-    {
-        var native = new FakeBackend("native") { SupportsText = false };
-        var software = new FakeBackend("software") { SupportsText = true };
-
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            Fallback = FallbackMode.Adaptive,
-            AdaptiveThreshold = 3,
-        });
-
-        var style = new TextStyle { Size = 10 };
-
-        using (FacadeImage first = engine.Create(40, 40, Rgba32.White))
-        {
-            first.DrawText("a", PointF.Empty, style);
-            first.DrawText("b", PointF.Empty, style);
-            Assert.Equal("native", first.BackendName);
-        }
-
-        using FacadeImage second = engine.Create(40, 40, Rgba32.White);
-        Assert.Equal(0, second.FallbackCount);
-        second.DrawText("a", PointF.Empty, style);
-        Assert.Equal("native", second.BackendName);
-    }
-
-    [Fact]
-    public void SwitchAndStay_Migrates_On_First_Fallback()
-    {
-        var events = new List<FallbackEvent>();
-        var native = new FakeBackend("native") { SupportsText = false };
-        var software = new FakeBackend("software") { SupportsText = true };
-
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            Fallback = FallbackMode.SwitchAndStay,
-            OnFallback = events.Add,
-        });
-
-        using FacadeImage image = engine.Create(60, 40, Rgba32.White);
-        var style = new TextStyle { Size = 10 };
-
-        image.DrawText("a", PointF.Empty, style);
-        Assert.Equal("software", image.BackendName);
-        Assert.Single(events);
-
-        image.DrawText("b", new PointF(0, 12), style);
-        Assert.Single(events);
-        Assert.Equal("software", image.BackendName);
-        Assert.True(image.IsSoftwareSurface);
-    }
-
-    [Fact]
-    public void Disabled_Throws_FeatureNotSupported()
-    {
-        var native = new FakeBackend("native") { SupportsText = false };
-
-        using var engine = new ImageEngine(native, new ImageEngineOptions { Fallback = FallbackMode.Disabled });
-        using FacadeImage image = engine.Create(20, 20, Rgba32.White);
 
         FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(
-            () => image.DrawText("x", PointF.Empty, new TextStyle { Size = 10 }));
+            () => image.DrawText("hi", new PointF(2, 2), new TextStyle { Size = 10 }));
 
         Assert.Equal("DrawText", ex.Feature);
         Assert.Equal("native", ex.BackendName);
-        Assert.Equal(FallbackMode.Disabled, ex.Fallback);
+        Assert.Contains("DrawText", ex.Message);
+        Assert.Equal(0, backend.DrawTextCalls);
     }
 
     [Fact]
-    public void Strict_Throws_Even_When_Fallback_Is_Configured()
+    public void Unsupported_Measure_Throws()
     {
-        var native = new FakeBackend("native") { SupportsText = false };
-        var software = new FakeBackend("software") { SupportsText = true };
-
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            Strict = true,
-        });
-
-        using FacadeImage image = engine.Create(20, 20, Rgba32.White);
-        Assert.Throws<FeatureNotSupportedException>(() => image.DrawText("x", PointF.Empty, new TextStyle { Size = 10 }));
-        Assert.Equal(0, software.DrawTextCalls);
-    }
-
-    [Fact]
-    public void No_Registered_Software_Backend_Throws_With_Hint()
-    {
-        SoftwareFallback.Unregister();
-
-        var native = new FakeBackend("native") { SupportsText = false };
-        using var engine = new ImageEngine(native);
-        using FacadeImage image = engine.Create(20, 20, Rgba32.White);
+        var backend = new FakeBackend("native") { SupportsText = false };
+        using var engine = CreateEngine(backend);
+        using FacadeImage image = engine.Create(80, 40, Rgba32.White);
 
         FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(
-            () => image.DrawText("x", PointF.Empty, new TextStyle { Size = 10 }));
+            () => image.MeasureText("hi", new TextStyle { Size = 10 }));
 
-        Assert.Contains("ImageFacade.SdcbSimdCodecs", ex.Message);
+        Assert.Equal("MeasureText", ex.Feature);
     }
 
     [Fact]
-    public void PreferSoftwareRendering_Routes_Drawing_To_Fallback()
+    public void Unsupported_Resize_Throws()
     {
-        var native = new FakeBackend("native");
-        var software = new FakeBackend("software");
+        var backend = new FakeBackend("native") { SupportsResize = false };
+        using var engine = CreateEngine(backend);
+        using FacadeImage image = engine.Create(80, 40, Rgba32.White);
 
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            Fallback = FallbackMode.PerOperation,
-            PreferSoftwareRendering = true,
-        });
+        FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(() => image.Resize(40, 20));
 
-        using FacadeImage image = engine.Create(30, 30, Rgba32.White);
-        image.DrawLine(new PointF(0, 0), new PointF(29, 29), Rgba32.Black);
-
-        Assert.Equal(0, native.DrawLineCalls);
-        Assert.Equal(1, software.DrawLineCalls);
-        Assert.Equal(Rgba32.Black, image.GetPixel(0, 0));
+        Assert.Equal("Resize", ex.Feature);
+        Assert.Equal(80, image.Width);
     }
 
     [Fact]
-    public void Alpha_Unsupported_Falls_Back()
+    public void Unsupported_Encode_Throws()
     {
-        var native = new FakeBackend("native") { SupportsAlphaBlending = false };
-        var software = new FakeBackend("software");
+        var backend = new FakeBackend("native");
+        using var engine = CreateEngine(backend);
+        using FacadeImage image = engine.Create(8, 8, Rgba32.White);
 
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            Fallback = FallbackMode.PerOperation,
-        });
+        FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(
+            () => image.Encode(new SaveOptions { Format = ImageFormat.Png }));
 
+        Assert.Equal("Encode", ex.Feature);
+    }
+
+    [Fact]
+    public void SemiTransparent_Shape_Throws_When_AlphaBlending_Unsupported()
+    {
+        var backend = new FakeBackend("native") { SupportsAlphaBlending = false };
+        using var engine = CreateEngine(backend);
+        using FacadeImage image = engine.Create(40, 40, Rgba32.White);
+
+        var color = new Rgba32(255, 0, 0, 128);
+        Assert.Throws<FeatureNotSupportedException>(
+            () => image.DrawLine(new PointF(0, 0), new PointF(20, 20), color));
+        Assert.Throws<FeatureNotSupportedException>(
+            () => image.FillRectangle(new RectF(0, 0, 10, 10), color));
+    }
+
+    [Fact]
+    public void Opaque_Shape_Still_Works_Without_AlphaBlending()
+    {
+        var backend = new FakeBackend("native") { SupportsAlphaBlending = false };
+        using var engine = CreateEngine(backend);
+        using FacadeImage image = engine.Create(40, 40, Rgba32.White);
+
+        image.FillRectangle(new RectF(0, 0, 10, 10), Rgba32.Black);
+
+        Assert.Equal(Rgba32.Black, image.GetPixel(5, 5));
+    }
+
+    [Fact]
+    public void Empty_Text_Is_NoOp_Even_When_Text_Unsupported()
+    {
+        var backend = new FakeBackend("native") { SupportsText = false };
+        using var engine = CreateEngine(backend);
         using FacadeImage image = engine.Create(20, 20, Rgba32.White);
-        image.DrawLine(new PointF(0, 0), new PointF(19, 19), new Rgba32(255, 0, 0, 128));
 
-        Assert.Equal(0, native.DrawLineCalls);
-        Assert.Equal(1, software.DrawLineCalls);
+        image.DrawText(string.Empty, PointF.Empty, new TextStyle { Size = 10 });
+
+        Assert.Equal(0, backend.DrawTextCalls);
     }
 
     [Fact]
-    public void UseSoftware_And_UseNative_Migrate_Pixels()
+    public void Unsupported_Polyline_Throws()
     {
-        var native = new FakeBackend("native");
-        var software = new FakeBackend("software");
+        var backend = new FakeBackend("native");
+        using var engine = CreateEngine(backend);
+        using FacadeImage image = engine.Create(40, 40, Rgba32.White);
 
-        using var engine = new ImageEngine(native, new ImageEngineOptions
+        Assert.Throws<FeatureNotSupportedException>(
+            () => image.DrawPolyline([new PointF(0, 0), new PointF(10, 10)], Rgba32.Black));
+    }
+
+    [Fact]
+    public void Load_Wraps_Backend_NotSupported_As_Feature_Not_Supported()
+    {
+        var backend = new FakeBackend("native");
+        using var engine = CreateEngine(backend);
+
+        FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(
+            () => engine.Load([1, 2, 3, 4]));
+
+        Assert.Equal("Decode", ex.Feature);
+        Assert.Equal("native", ex.BackendName);
+        Assert.IsType<NotSupportedException>(ex.InnerException);
+    }
+
+    [Fact]
+    public void Encode_Wraps_Backend_NotSupported_As_Feature_Not_Supported()
+    {
+        using var engine = new ImageEngine(new RejectingEncodeBackend());
+        using FacadeImage image = engine.Create(8, 8, Rgba32.White);
+
+        FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(
+            () => image.Encode(new SaveOptions { Format = ImageFormat.Png }));
+
+        Assert.Equal("Encode", ex.Feature);
+        Assert.IsType<NotSupportedException>(ex.InnerException);
+    }
+
+    /// <summary>声明支持 PNG，但运行时拒绝编码（模拟缺编码器）。</summary>
+    private sealed class RejectingEncodeBackend : FakeBackend
+    {
+        private static readonly IReadOnlySet<ImageFormat> Png = new HashSet<ImageFormat> { ImageFormat.Png };
+
+        public RejectingEncodeBackend()
+            : base("native")
         {
-            FallbackBackend = software,
-        });
+        }
 
-        using FacadeImage image = engine.Create(10, 10, Rgba32.White);
-        image.UseSoftware();
+        public override IReadOnlySet<ImageFormat> SupportedEncodeFormats => Png;
 
-        Assert.Equal("software", image.BackendName);
-        Assert.Equal(Rgba32.White, image.GetPixel(5, 5));
-
-        image.UseNative();
-        Assert.Equal("native", image.BackendName);
-        Assert.Equal(Rgba32.White, image.GetPixel(5, 5));
+        public override void Encode(IFrame frame, Stream destination, in EncodeRequest request)
+            => throw new NotSupportedException("没有可用的 PNG 编码器。");
     }
 }

@@ -5,27 +5,23 @@ using ImageFacade.Internal;
 namespace ImageFacade;
 
 /// <summary>
-/// 门面入口：持有一个后端与一套选项，负责创建 / 加载图像。
+/// 门面入口：持有一个后端，负责创建 / 加载图像。后端不具备的能力直接抛
+/// <see cref="FeatureNotSupportedException"/>，不做任何跨后端回退。
 /// 可跨线程共享（后端本身无状态）；<see cref="FacadeImage"/> 不可。
 /// </summary>
 public sealed class ImageEngine : IDisposable
 {
     private static ImageEngine? s_default;
 
-    private IImageBackend? _fallback;
-
     private bool _disposed;
 
-    public ImageEngine(IImageBackend backend, ImageEngineOptions? options = null)
+    public ImageEngine(IImageBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
         Backend = backend;
-        Options = (options ?? new ImageEngineOptions()).Validate();
     }
 
     public IImageBackend Backend { get; }
-
-    public ImageEngineOptions Options { get; }
 
     /// <summary>可选全局默认，必须显式赋值——门面不做任何自动探测。</summary>
     public static ImageEngine? Default
@@ -79,6 +75,15 @@ public sealed class ImageEngine : IDisposable
         {
             IFrame frame = Backend.Decode(data, new DecodeRequest(load.AutoOrient, load.FrameIndex), out ImageMetadata metadata);
             return new FacadeImage(this, Backend, frame, metadata);
+        }
+        catch (FeatureNotSupportedException)
+        {
+            throw;
+        }
+        catch (NotSupportedException ex)
+        {
+            // 后端用 NotSupportedException 表示"这个格式/特性我干不了"：统一成门面的能力异常
+            throw new FeatureNotSupportedException("Decode", Backend.Name, ex);
         }
         catch (Exception ex) when (ex is not ImageBackendException and not ArgumentException)
         {
@@ -143,6 +148,14 @@ public sealed class ImageEngine : IDisposable
                 : await AsyncBridge.Run(DecodeLocally, cancellationToken).ConfigureAwait(false);
 
             return new FacadeImage(this, Backend, decoded.Frame, decoded.Metadata);
+        }
+        catch (FeatureNotSupportedException)
+        {
+            throw;
+        }
+        catch (NotSupportedException ex)
+        {
+            throw new FeatureNotSupportedException("Decode", Backend.Name, ex);
         }
         catch (Exception ex) when (ex is not ImageBackendException and not ArgumentException and not OperationCanceledException)
         {
@@ -264,31 +277,6 @@ public sealed class ImageEngine : IDisposable
         return FromPixels(source, width, height, stride, format);
     }
 
-    /// <summary>
-    /// 懒创建回退后端：<see cref="ImageEngineOptions.FallbackBackend"/> 优先（不归引擎释放），
-    /// 否则用 <see cref="SoftwareFallback"/> 注册的工厂；都没注册就返回 null（调用方抛 FeatureNotSupported）。
-    /// </summary>
-    internal IImageBackend? GetFallback()
-    {
-        if (Options.FallbackBackend is { } explicitBackend)
-        {
-            return explicitBackend;
-        }
-
-        // 主后端本身就是软后端：回退目标就是它自己（plan §5.5）
-        if (string.Equals(Backend.Name, "software", StringComparison.OrdinalIgnoreCase))
-        {
-            return Backend;
-        }
-
-        if (_fallback is null)
-        {
-            _fallback = SoftwareFallback.TryCreate();
-        }
-
-        return _fallback;
-    }
-
     internal static void ValidateSize(int width, int height)
     {
         if (width <= 0)
@@ -323,8 +311,6 @@ public sealed class ImageEngine : IDisposable
         }
 
         _disposed = true;
-        _fallback?.Dispose();
-        _fallback = null;
         Backend.Dispose();
     }
 }

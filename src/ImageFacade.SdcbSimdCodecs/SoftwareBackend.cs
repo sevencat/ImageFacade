@@ -12,9 +12,6 @@ public sealed class SoftwareBackend : ImageBackendBase
 {
     private readonly ConcurrentDictionary<FontRef, Font> _fonts = new();
 
-    /// <summary>把软后端注册为全局回退目标（幂等）。引用本程序集时模块初始化器已自动调用。</summary>
-    public static void UseAsFallback() => SoftwareFallback.Register(static () => new SoftwareBackend());
-
     public override string Name => "software";
 
     public override Version Version => typeof(SoftwareBackend).Assembly.GetName().Version ?? new Version(0, 1, 0);

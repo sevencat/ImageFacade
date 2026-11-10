@@ -1,4 +1,4 @@
-using ImageFacade.SkiaSharp;
+﻿using ImageFacade.SkiaSharp;
 using Xunit;
 
 namespace ImageFacade.Tests;
@@ -7,7 +7,7 @@ namespace ImageFacade.Tests;
 public sealed class SkiaBackendTests
 {
     private static ImageEngine CreateEngine()
-        => new(new SkiaBackend(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        => new(new SkiaBackend());
 
     [Fact]
     public void Create_And_GetPixel_RoundTrips()

@@ -1,18 +1,18 @@
-using ImageFacade.Backends;
-using ImageFacade.SdcbSimdCodecs;
+﻿using ImageFacade.Backends;
+using ImageFacade.SkiaSharp;
 using Xunit;
 
 namespace ImageFacade.Tests;
 
 public sealed class AsyncTests
 {
-    private static ImageEngine CreateSoftwareEngine()
-        => new(new SoftwareBackend(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+    private static ImageEngine CreateEngine()
+        => new(new SkiaBackend());
 
     [Fact]
     public async Task SaveAsync_And_LoadAsync_RoundTrip()
     {
-        using var engine = CreateSoftwareEngine();
+        using var engine = CreateEngine();
         using FacadeImage image = engine.Create(16, 16, Rgba32.White);
         image.FillRectangle(new RectF(2, 2, 4, 4), Rgba32.Red);
 
@@ -35,7 +35,7 @@ public sealed class AsyncTests
     [Fact]
     public async Task EncodeAsync_LoadAsync_Stream_RoundTrip()
     {
-        using var engine = CreateSoftwareEngine();
+        using var engine = CreateEngine();
         using FacadeImage image = engine.Create(8, 8, Rgba32.Blue);
 
         byte[] png = await image.EncodeAsync(new SaveOptions { Format = ImageFormat.Png });
@@ -52,7 +52,7 @@ public sealed class AsyncTests
     [Fact]
     public async Task LoadAsync_PreCancelled_Throws()
     {
-        using var engine = CreateSoftwareEngine();
+        using var engine = CreateEngine();
         using var cts = new CancellationTokenSource();
         await cts.CancelAsync();
 
@@ -63,7 +63,7 @@ public sealed class AsyncTests
     [Fact]
     public async Task EncodeAsync_PreCancelled_Throws()
     {
-        using var engine = CreateSoftwareEngine();
+        using var engine = CreateEngine();
         using FacadeImage image = engine.Create(4, 4, Rgba32.White);
         using var cts = new CancellationTokenSource();
         await cts.CancelAsync();
@@ -76,7 +76,7 @@ public sealed class AsyncTests
     public async Task Uses_Async_Backend_Interface_When_Available()
     {
         var backend = new AsyncFakeBackend();
-        using var engine = new ImageEngine(backend, new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        using var engine = new ImageEngine(backend);
 
         using FacadeImage image = await engine.LoadAsync(new byte[] { 1, 2, 3 });
 
@@ -94,7 +94,7 @@ public sealed class AsyncTests
     public async Task Sync_Backend_Is_Wrapped_In_Task_Run()
     {
         var backend = new PngFakeBackend();
-        using var engine = new ImageEngine(backend, new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        using var engine = new ImageEngine(backend);
         using FacadeImage image = engine.Create(4, 4, Rgba32.White);
 
         byte[] encoded = await image.EncodeAsync(new SaveOptions { Format = ImageFormat.Png });

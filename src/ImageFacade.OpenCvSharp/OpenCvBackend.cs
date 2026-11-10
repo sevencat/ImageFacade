@@ -1,10 +1,8 @@
 using System.Collections.Concurrent;
 using ImageFacade.Backends;
-#if OPENCV5
 using GlyphLayout = ImageFacade.Text.Engine.TextLayout;
 using GlyphMask = ImageFacade.Text.Engine.GlyphMask;
 using GlyphPositioned = ImageFacade.Text.Engine.PositionedGlyph;
-#endif
 using Cv2 = OpenCvSharp.Cv2;
 using CvColorConversion = OpenCvSharp.ColorConversionCodes;
 using CvException = OpenCvSharp.OpenCvSharpException;
@@ -31,13 +29,13 @@ namespace ImageFacade.OpenCvSharp;
 /// <remarks>
 /// <para>
 /// 形状绘制受 OpenCV 本身限制：<b>没有 alpha 混合</b>，<c>color.A &lt; 255</c> 的
-/// <c>Fill/Draw/Line</c> 一律返回 <c>false</c>，由门面回退到软后端。
+/// <c>Fill/Draw/Line</c> 一律返回 <c>false</c>，由门面抛 <see cref="FeatureNotSupportedException"/>；
+/// 需要半透明形状时在调用方自行合成，或改用 Skia / ImageSharp。
 /// </para>
 /// <para>
-/// 文字：<b>不用 <c>Cv2.PutText</c></b>（Hershey 只有 ASCII、外观差得远）。OpenCV 4 的字体模块在
-/// contrib 扩展包里，缺省认为没有，所以 <c>OPENCV4</c> 编译时 <c>DrawText</c> 直接返回 <c>false</c> 交给回退；
-/// <c>OPENCV5</c> 编译时复用核心 <see cref="ImageFacade.Font"/> 的"嵌入字体 + 自己解析 TrueType"光栅化，
-/// 把 A8 覆盖位图按覆盖率混进 BGRA 的 <c>Mat</c>，中文与半透明文字都能画。
+/// 文字：<b>不用 <c>Cv2.PutText</c></b>（Hershey 只有 ASCII、外观差得远）。4/5 都复用核心
+/// <see cref="ImageFacade.Font"/> 的"嵌入字体 + 自己解析 TrueType"光栅化，把 A8 覆盖位图按覆盖率
+/// 混进 BGRA 的 <c>Mat</c>，中文与半透明文字都能画，不需要任何其他后端。
 /// </para>
 /// <para>
 /// 同一份源码被 <c>ImageFacade.OpenCvSharp</c>（OPENCV4：OpenCvSharp4 4.13）与
@@ -60,9 +58,7 @@ public sealed class OpenCvBackend : IImageBackend
         static () => Cv2.GetVersionString() ?? "unknown",
         LazyThreadSafetyMode.ExecutionAndPublication);
 
-#if OPENCV5
     private readonly ConcurrentDictionary<FontRef, Font> _fonts = new();
-#endif
 
     public OpenCvBackend() => EnsureNativeLoaded();
 
@@ -87,20 +83,17 @@ public sealed class OpenCvBackend : IImageBackend
     public Version Version => typeof(OpenCvBackend).Assembly.GetName().Version ?? new Version(0, 1, 0);
 
     /// <summary>
-    /// 注意：**没有** <see cref="BackendCapabilities.AlphaBlending"/>、<see cref="BackendCapabilities.Dash"/>；
-    /// 半透明形状与虚线靠回退。文字由托管字形光栅化提供（net10.0 起，含 CJK）。
+    /// 注意：**没有** <see cref="BackendCapabilities.AlphaBlending"/>、<see cref="BackendCapabilities.Dash"/>。
+    /// 文字由核心的托管字形光栅化提供（含 CJK），4/5 一致。
     /// </summary>
     public BackendCapabilities Capabilities =>
         BackendCapabilities.Resize
         | BackendCapabilities.DrawShapes
         | BackendCapabilities.DrawPoints
-        | BackendCapabilities.LossyEncode
-        | BackendCapabilities.ExifOrientation
-#if OPENCV5
         | BackendCapabilities.DrawText
         | BackendCapabilities.DrawTextUnicode
-#endif
-        ;
+        | BackendCapabilities.LossyEncode
+        | BackendCapabilities.ExifOrientation;
 
     public IReadOnlySet<ImageFormat> SupportedDecodeFormats => Formats;
 
@@ -409,7 +402,6 @@ public sealed class OpenCvBackend : IImageBackend
             return true;
         }
 
-#if OPENCV5
         Font font;
         GlyphLayout layout;
         try
@@ -437,15 +429,10 @@ public sealed class OpenCvBackend : IImageBackend
         var target = (OpenCvFrame)frame;
         BlendGlyphs(target.Mat, layout, originX, originY, spec.Style.Color);
         return true;
-#else
-        // OpenCV 4 没有字体模块（contrib 扩展包缺省视为不存在）：交给门面回退
-        return false;
-#endif
     }
 
     public bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
     {
-#if OPENCV5
         Font font;
         try
         {
@@ -465,10 +452,6 @@ public sealed class OpenCvBackend : IImageBackend
 
         metrics = new TextMetrics(font.Measure(spec.Text, size), ascent, descent, gap);
         return true;
-#else
-        metrics = default;
-        return false;
-#endif
     }
 
     // ---- 像素 ----
@@ -618,10 +601,7 @@ public sealed class OpenCvBackend : IImageBackend
         }
         finally
         {
-            foreach (CvMat plane in planes)
-            {
-                plane.Dispose();
-            }
+            planes.DisposeAll();
         }
     }
 
@@ -677,7 +657,6 @@ public sealed class OpenCvBackend : IImageBackend
 
     // ---- 内部：文字 ----
 
-#if OPENCV5
     private Font ResolveFont(FontRef reference)
     {
         if (reference.IsBuiltIn)
@@ -764,7 +743,6 @@ public sealed class OpenCvBackend : IImageBackend
 
     private static byte BlendChannel(byte source, byte destination, float alpha)
         => (byte)Math.Clamp(MathF.Round((source * alpha) + (destination * (1f - alpha))), 0f, 255f);
-#endif
 
     // ---- 内部：格式嗅探 ----
 

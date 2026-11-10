@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -23,7 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
-    <ProjectReference Include="..\..\src\ImageFacade.SdcbSimdCodecs\ImageFacade.SdcbSimdCodecs.csproj" />
+    
     <ProjectReference Include="..\..\src\ImageFacade.OpenCvSharp5\ImageFacade.OpenCvSharp5.csproj" />
   </ItemGroup>
 

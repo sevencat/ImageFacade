@@ -1,6 +1,5 @@
-using ImageFacade.Backends;
+﻿using ImageFacade.Backends;
 using ImageFacade.ImageSharp;
-using ImageFacade.SdcbSimdCodecs;
 using Xunit;
 
 namespace ImageFacade.Tests.ImageSharp;
@@ -13,7 +12,7 @@ namespace ImageFacade.Tests.ImageSharp;
 public sealed class ImageSharpBackendTests
 {
     private static ImageEngine CreateEngine()
-        => new(new ImageSharpBackend(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        => new(new ImageSharpBackend());
 
     private static int CountInk(FacadeImage image)
     {
@@ -290,42 +289,4 @@ public sealed class ImageSharpBackendTests
         Assert.Equal(new Rgba32(10, 20, 30), image.GetPixel(0, 0));
     }
 
-    // ---- 与软后端的一致性（M4 口径，plan §9）----
-
-    private static (string Name, SizeF Measure, int Left, int Top, int Right, int Bottom, Rgba32 Rect, Rgba32 Line, Rgba32 Ellipse) Render(IImageBackend backend)
-    {
-        using var engine = new ImageEngine(backend, new ImageEngineOptions { Fallback = FallbackMode.Disabled });
-        using FacadeImage image = engine.Create(200, 120, Rgba32.White);
-
-        image
-            .FillRectangle(new RectF(20, 20, 60, 40), new Rgba32(0x20, 0x60, 0xC0))
-            .DrawLine(new PointF(10, 100), new PointF(190, 100), Rgba32.Red, width: 4)
-            .FillEllipse(new RectF(120, 20, 60, 40), Rgba32.Green);
-
-        var style = new TextStyle { Size = 20, Color = Rgba32.Black };
-        SizeF measure = image.MeasureText("Ag中文", style);
-        image.DrawText("Ag中文", new PointF(20, 60), style);
-
-        var (left, top, right, bottom) = InkBounds(image);
-        return (backend.Name, measure, left, top, right, bottom, image.GetPixel(50, 40), image.GetPixel(100, 100), image.GetPixel(150, 40));
-    }
-
-    [Fact]
-    public void ImageSharp_Agrees_With_Software_Backend()
-    {
-        var imageSharp = Render(new ImageSharpBackend());
-        var software = Render(new SoftwareBackend());
-
-        Assert.Equal(new Rgba32(0x20, 0x60, 0xC0), imageSharp.Rect);
-        Assert.Equal(Rgba32.Red, imageSharp.Line);
-        Assert.Equal(Rgba32.Green, imageSharp.Ellipse);
-
-        Assert.True(Math.Abs(imageSharp.Left - software.Left) <= 2, $"左边界 {imageSharp.Left} vs {software.Left}");
-        Assert.True(Math.Abs(imageSharp.Top - software.Top) <= 2, $"上边界 {imageSharp.Top} vs {software.Top}");
-        Assert.True(Math.Abs(imageSharp.Right - software.Right) <= 2, $"右边界 {imageSharp.Right} vs {software.Right}");
-        Assert.True(Math.Abs(imageSharp.Bottom - software.Bottom) <= 2, $"下边界 {imageSharp.Bottom} vs {software.Bottom}");
-        Assert.True(
-            Math.Abs(imageSharp.Measure.Width - software.Measure.Width) <= 2f,
-            $"文字宽测量 {imageSharp.Measure.Width} vs {software.Measure.Width}");
-    }
 }

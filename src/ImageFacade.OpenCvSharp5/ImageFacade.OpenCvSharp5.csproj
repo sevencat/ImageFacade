@@ -1,10 +1,9 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade.OpenCvSharp5</AssemblyName>
     <RootNamespace>ImageFacade.OpenCvSharp</RootNamespace>
-    <DefineConstants>$(DefineConstants);OPENCV5</DefineConstants>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
@@ -17,7 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 源码只有一份：放在当前主版本工程下，本工程链接编译（差异用 DefineConstants 隔离） -->
+    <!-- 源码只有一份：放在当前主版本工程下，本工程链接编译（4/5 共用，能力完全一致） -->
     <Compile Include="..\ImageFacade.OpenCvSharp\**\*.cs"
              Exclude="..\ImageFacade.OpenCvSharp\bin\**;..\ImageFacade.OpenCvSharp\obj\**"
              Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />

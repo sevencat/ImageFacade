@@ -13,32 +13,20 @@ public class ImageBackendException : Exception
 }
 
 /// <summary>
-/// 后端不具备该能力，且没有可用的回退后端（或 <see cref="FallbackMode.Disabled"/> / Strict 模式）。
+/// 后端不具备该能力。库不做跨后端回退，需要另一种渲染时请显式换用支持该能力的后端
+/// （例如 OpenCV 不支持半透明形状，可改用 Skia / ImageSharp）。
 /// </summary>
 public sealed class FeatureNotSupportedException : NotSupportedException
 {
-    public FeatureNotSupportedException(string feature, string backendName, FallbackMode fallback)
-        : base(BuildMessage(feature, backendName, fallback))
+    public FeatureNotSupportedException(string feature, string backendName, Exception? innerException = null)
+        : base($"后端 '{backendName}' 不支持能力 '{feature}'。请换用支持该能力的后端，或在调用方自行合成。", innerException)
     {
         Feature = feature;
         BackendName = backendName;
-        Fallback = fallback;
     }
 
+    /// <summary>能力名，如 <c>DrawLine</c> / <c>DrawText</c> / <c>Encode</c>。</summary>
     public string Feature { get; }
 
     public string BackendName { get; }
-
-    public FallbackMode Fallback { get; }
-
-    private static string BuildMessage(string feature, string backendName, FallbackMode fallback)
-    {
-        string hint = fallback switch
-        {
-            FallbackMode.Disabled => "当前 Fallback = Disabled（严格模式），不会自动回退。",
-            _ => "没有可用的回退后端：引用 ImageFacade.SdcbSimdCodecs，或在 ImageEngineOptions.FallbackBackend 里显式指定一个。",
-        };
-
-        return $"后端 '{backendName}' 不支持能力 '{feature}'。{hint}";
-    }
 }

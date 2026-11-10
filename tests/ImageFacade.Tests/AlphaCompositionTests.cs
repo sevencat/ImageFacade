@@ -1,4 +1,4 @@
-using ImageFacade.SdcbSimdCodecs;
+﻿using ImageFacade.SkiaSharp;
 using Xunit;
 
 namespace ImageFacade.Tests;
@@ -9,7 +9,11 @@ namespace ImageFacade.Tests;
 public sealed class AlphaCompositionTests
 {
     private static ImageEngine CreateEngine()
-        => new(new SoftwareBackend(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        => new(new SkiaBackend());
+
+    /// <summary>Skia 后端没有 BMP 编码，BMP 用例走 ImageSharp。</summary>
+    private static ImageEngine CreateBmpEngine()
+        => new(new ImageFacade.ImageSharp.ImageSharpBackend());
 
     [Fact]
     public void Jpeg_Transparent_Area_Uses_Configured_Background()
@@ -69,7 +73,7 @@ public sealed class AlphaCompositionTests
     [Fact]
     public void Bmp_RoundTrip_Is_Lossless()
     {
-        using var engine = CreateEngine();
+        using var engine = CreateBmpEngine();
         Assert.True(engine.CanEncode(ImageFormat.Bmp));
 
         using FacadeImage image = engine.Create(8, 8, new Rgba32(10, 20, 30));
@@ -89,7 +93,7 @@ public sealed class AlphaCompositionTests
     [Fact]
     public void Bmp_Transparent_Area_Uses_Configured_Background()
     {
-        using var engine = CreateEngine();
+        using var engine = CreateBmpEngine();
         using FacadeImage image = engine.Create(8, 8, null);
 
         byte[] bmp = image.Encode(new SaveOptions
@@ -110,7 +114,7 @@ public sealed class AlphaCompositionTests
     {
         // 全不透明时不应额外建临时帧：用假后端记录 Create 次数来验证
         var backend = new CountingBackend();
-        using var engine = new ImageEngine(backend, new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        using var engine = new ImageEngine(backend);
         using FacadeImage image = engine.Create(8, 8, Rgba32.White);
 
         int before = backend.CreateCalls;

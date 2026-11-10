@@ -1,4 +1,4 @@
-using ImageFacade.Internal;
+﻿using ImageFacade.Internal;
 using Xunit;
 
 namespace ImageFacade.Tests;
@@ -81,7 +81,7 @@ public sealed class FacadeResizeTests
     [Fact]
     public void Pad_Fills_Border_With_PadColor()
     {
-        using var engine = new ImageEngine(new FakeBackend(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        using var engine = new ImageEngine(new FakeBackend());
         using FacadeImage image = engine.Create(100, 50, Rgba32.White);
 
         image.Resize(new ResizeOptions
@@ -102,7 +102,7 @@ public sealed class FacadeResizeTests
     [Fact]
     public void Crop_Outputs_Exact_Target_Size()
     {
-        using var engine = new ImageEngine(new FakeBackend(), new ImageEngineOptions { Fallback = FallbackMode.Disabled });
+        using var engine = new ImageEngine(new FakeBackend());
         using FacadeImage image = engine.Create(100, 50, Rgba32.White);
 
         image.Resize(new ResizeOptions { Width = 60, Height = 60, Mode = ResizeMode.Crop, PadColor = Rgba32.Red });
@@ -113,24 +113,4 @@ public sealed class FacadeResizeTests
         Assert.Equal(Rgba32.White, image.GetPixel(59, 59));
     }
 
-    [Fact]
-    public void Resize_Falls_Back_When_Backend_Cannot_Resize()
-    {
-        var native = new FakeBackend("native") { SupportsResize = false };
-        var software = new FakeBackend("software");
-
-        using var engine = new ImageEngine(native, new ImageEngineOptions
-        {
-            FallbackBackend = software,
-            Fallback = FallbackMode.PerOperation,
-        });
-
-        using FacadeImage image = engine.Create(40, 40, Rgba32.White);
-        image.Resize(20, 20);
-
-        Assert.Equal(20, image.Width);
-        Assert.Equal("native", image.BackendName);      // 不迁移整张图
-        Assert.Equal(1, software.ResizeCalls);
-        Assert.Equal(1, image.FallbackCount);
-    }
 }

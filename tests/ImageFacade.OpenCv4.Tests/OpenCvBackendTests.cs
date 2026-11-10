@@ -1,25 +1,19 @@
-using ImageFacade.Backends;
+﻿using ImageFacade.Backends;
 using ImageFacade.OpenCvSharp;
-using ImageFacade.SdcbSimdCodecs;
 using Xunit;
 
 namespace ImageFacade.Tests.OpenCv;
 
 /// <summary>
-/// OpenCV 后端（M6）的端到端行为：原生能画的（不透明形状/几何/编解码）必须真机跑通，
-/// 原生画不了的（半透明、虚线、文字）必须**老老实实返回 false** 并走门面回退。
+/// OpenCV 后端（M6）的端到端行为：原生能画的（不透明形状/几何/编解码/文字）必须真机跑通，
+/// 原生画不了的（半透明形状、虚线）抛 <see cref="FeatureNotSupportedException"/>。
+/// 文字由核心的托管字形光栅化提供，4/5 一致。
 /// 同一份源码被 <c>ImageFacade.OpenCv4.Tests</c>（OpenCvSharp4 4.13）与
 /// <c>ImageFacade.OpenCv5.Tests</c>（OpenCvSharp5 5.0）各编一遍。
 /// </summary>
 public sealed class OpenCvBackendTests
 {
-    // 显式注册一次：ModuleInitializer 只在软后端程序集被加载后生效，测试顺序不保证
-    static OpenCvBackendTests() => SoftwareBackend.UseAsFallback();
-
-    private static ImageEngine CreateEngine(FallbackMode fallback = FallbackMode.Disabled, Action<FallbackEvent>? onFallback = null)
-        => new(
-            new OpenCvBackend(),
-            new ImageEngineOptions { Fallback = fallback, OnFallback = onFallback });
+    private static ImageEngine CreateEngine() => new(new OpenCvBackend());
 
     private static int CountInk(FacadeImage image)
     {
@@ -34,34 +28,6 @@ public sealed class OpenCvBackendTests
         }
 
         return ink;
-    }
-
-    private static (int Left, int Top, int Right, int Bottom) InkBounds(FacadeImage image)
-    {
-        byte[] pixels = image.CopyPixels();
-        int left = int.MaxValue;
-        int top = int.MaxValue;
-        int right = -1;
-        int bottom = -1;
-
-        for (int y = 0; y < image.Height; y++)
-        {
-            for (int x = 0; x < image.Width; x++)
-            {
-                int offset = ((y * image.Width) + x) * 4;
-                if (pixels[offset] == 255 && pixels[offset + 1] == 255 && pixels[offset + 2] == 255)
-                {
-                    continue;
-                }
-
-                left = Math.Min(left, x);
-                top = Math.Min(top, y);
-                right = Math.Max(right, x);
-                bottom = Math.Max(bottom, y);
-            }
-        }
-
-        return (left, top, right, bottom);
     }
 
     [Fact]
@@ -149,42 +115,31 @@ public sealed class OpenCvBackendTests
         Assert.Equal(Rgba32.White, image.GetPixel(2, 2));
     }
 
-    [Fact]
-    public void Text_Support_Follows_OpenCv_Version()
+    [Theory]
+    [InlineData("中文Ab")]
+    [InlineData("Hello")]
+    [InlineData("标 签: 42")]
+    public void Text_Renders_Unicode_And_Ascii(string text)
     {
-        var events = new List<FallbackEvent>();
-        using var engine = CreateEngine(FallbackMode.PerOperation, events.Add);
-        using FacadeImage image = engine.Create(200, 80, Rgba32.White);
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(240, 80, Rgba32.White);
 
         var style = new TextStyle { Size = 32, Color = Rgba32.Black };
 
-#if OPENCV5
         Assert.True(engine.Backend.Capabilities.HasFlag(BackendCapabilities.DrawTextUnicode));
 
-        SizeF measured = image.MeasureText("中文Ab", style);
-        image.DrawText("中文Ab", new PointF(8, 8), style);
+        SizeF measured = image.MeasureText(text, style);
+        image.DrawText(text, new PointF(8, 8), style);
 
         Assert.True(measured.Width > 0f);
         Assert.True(measured.Height > 0f);
-        Assert.True(CountInk(image) > 50, "嵌入字体的托管光栅化应画出中文墨迹");
-        Assert.Empty(events);
-#else
-        // OpenCV 4 没有字体模块（contrib 扩展缺省视为不存在）：能力表里没有文字，一律交给回退
-        Assert.False(engine.Backend.Capabilities.HasFlag(BackendCapabilities.DrawTextUnicode));
-
-        image.DrawText("中文Ab", new PointF(8, 8), style);
-
-        Assert.True(CountInk(image) > 50, "回退到软后端后应有文字墨迹");
-        Assert.Contains(events, e => e.Feature == "DrawText" && e.FromBackend == "opencv" && e.ToBackend == "software");
-#endif
+        Assert.True(CountInk(image) > 50, "核心字形光栅化应画出墨迹");
     }
 
-#if OPENCV5
     [Fact]
     public void DrawText_Reuses_Provided_Font_Instance()
     {
-        var events = new List<FallbackEvent>();
-        using var engine = CreateEngine(FallbackMode.PerOperation, events.Add);
+        using var engine = CreateEngine();
         using FacadeImage image = engine.Create(200, 80, Rgba32.White);
 
         // 传字体实例：不再走 FontRef 解析，也就不会重新解析字体表
@@ -198,7 +153,6 @@ public sealed class OpenCvBackendTests
 
         Assert.True(measured.Width > 0f);
         Assert.True(CountInk(image) > 100);
-        Assert.Empty(events);
     }
 
     [Fact]
@@ -217,25 +171,6 @@ public sealed class OpenCvBackendTests
         }
 
         Assert.InRange(darkest, 100, 170);
-    }
-#endif
-
-    [Fact]
-    public void Dash_Falls_Back_To_Software_And_Reports_Event()
-    {
-        var events = new List<FallbackEvent>();
-        using var engine = CreateEngine(FallbackMode.PerOperation, events.Add);
-        using FacadeImage image = engine.Create(120, 40, Rgba32.White);
-
-        image.DrawLine(
-            new PointF(0, 20),
-            new PointF(120, 20),
-            Rgba32.Black,
-            width: 4,
-            new StrokeStyle { DashPattern = [4f, 4f] });
-
-        Assert.True(CountInk(image) > 0, "回退到软后端后应画出虚线");
-        Assert.Contains(events, e => e.Feature == "DrawLine" && e.FromBackend == "opencv" && e.ToBackend == "software");
     }
 
     [Fact]
@@ -315,48 +250,4 @@ public sealed class OpenCvBackendTests
         Assert.Equal(new Rgba32(10, 20, 30), image.GetPixel(0, 0));
     }
 
-    // ---- 与软后端的一致性（只比原生能力覆盖的绘制）----
-
-    private static (int Left, int Top, int Right, int Bottom, Rgba32 Rect, Rgba32 Line, Rgba32 Ellipse, SizeF Measure) RenderShapes(IImageBackend backend)
-    {
-        using var engine = new ImageEngine(backend, new ImageEngineOptions { Fallback = FallbackMode.Disabled });
-        using FacadeImage image = engine.Create(200, 120, Rgba32.White);
-
-        image
-            .FillRectangle(new RectF(20, 20, 60, 40), new Rgba32(0x20, 0x60, 0xC0))
-            .DrawLine(new PointF(10, 100), new PointF(190, 100), Rgba32.Red, width: 4)
-            .FillEllipse(new RectF(120, 20, 60, 40), Rgba32.Green);
-
-        // 文字两边都走同一套嵌入字体光栅化，测量与墨迹应当一致（仅 OpenCV 5）
-        SizeF measure = default;
-#if OPENCV5
-        var style = new TextStyle { Size = 20, Color = Rgba32.Black };
-        measure = image.MeasureText("Ag中文", style);
-        image.DrawText("Ag中文", new PointF(20, 60), style);
-#endif
-
-        var (left, top, right, bottom) = InkBounds(image);
-        return (left, top, right, bottom, image.GetPixel(50, 40), image.GetPixel(100, 100), image.GetPixel(150, 40), measure);
-    }
-
-    [Fact]
-    public void OpenCv_Agrees_With_Software_Backend_On_Shapes()
-    {
-        var openCv = RenderShapes(new OpenCvBackend());
-        var software = RenderShapes(new SoftwareBackend());
-
-        Assert.Equal(new Rgba32(0x20, 0x60, 0xC0), openCv.Rect);
-        Assert.Equal(Rgba32.Red, openCv.Line);
-        Assert.Equal(Rgba32.Green, openCv.Ellipse);
-
-        Assert.True(Math.Abs(openCv.Left - software.Left) <= 2, $"左边界 {openCv.Left} vs {software.Left}");
-        Assert.True(Math.Abs(openCv.Top - software.Top) <= 2, $"上边界 {openCv.Top} vs {software.Top}");
-        Assert.True(Math.Abs(openCv.Right - software.Right) <= 2, $"右边界 {openCv.Right} vs {software.Right}");
-        Assert.True(Math.Abs(openCv.Bottom - software.Bottom) <= 2, $"下边界 {openCv.Bottom} vs {software.Bottom}");
-#if OPENCV5
-        Assert.True(
-            Math.Abs(openCv.Measure.Width - software.Measure.Width) <= 2f,
-            $"文字宽测量 {openCv.Measure.Width} vs {software.Measure.Width}");
-#endif
-    }
 }
