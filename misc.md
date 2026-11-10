@@ -805,6 +805,8 @@ OpenCvSharp 4/5 更简单：两代 API 完全一致，`ImageFacade.OpenCvSharp5`
 
 ### X.4 工程 ↔ 版本对照
 
+包 ID = `Sevencat.` + 下表工程名；程序集名与命名空间不带前缀（`using ImageFacade;` 不变）。
+
 | 工程 | 三方库 | 备注 |
 |---|---|---|
 | `ImageFacade` | 无 | 核心：契约 + 默认实现 + 字体 |
@@ -924,3 +926,4 @@ Fonts/             （不复制字体，改用核心的 WenQuanYiMicroHei.ttf.gz
 | 示例集与截图 | `samples/ImageFacade.Samples` 拆成 5 个场景 + 四后端对比拼图；输出固定写到仓库根 `docs/images`（向上找 `ImageFacade.slnx`，与 CWD 无关）；配套 `Compose` 拼图助手（约 40 行） | 拼图要跨图合成，门面没有这种 API，用 `CopyPixels` + `engine.FromPixels` 手写。踩两个坑：① `Max` = 完整放下、`Min` = 覆盖目标（.NET/SixLabors 命名），最初标签写反了；② 拼图时 `offset` 必须相对格子计算，用绝对坐标算 `-baseX` 会把「裁切」判成「不裁切」。示例里 engine 的生命周期要盖住拼图步骤，所以由调用方创建、最后统一释放 |
 | README 首页化 | 加徽章、hero 图、四后端对比、截图区、Resize 六模式说明；`docs/images` 随包分发 | 若不把 `docs\images` 打进包，NuGet 页面上 README 的截图会裂；`Directory.Build.props` 已加 `Pack="true"` 注入 |
 | CI | `.github/workflows/ci.yml`：`windows-latest` + .NET 10，restore → build → test → pack → 上传 nupkg | 把 pack 当验收项跑，顺带验证 7 个包能出 |
+| 首次发布 | `Directory.Build.props` 加 `PackageId=Sevencat.$(MSBuildProjectName)` 与 `VersionPrefix=0.1`；pack 产出 `Sevencat.ImageFacade*.0.1.0.nupkg` + `.snupkg`；用环境变量 `NUGET_API_KEY` 推送到 nuget.org（7 个包全部 Accepted） | 程序集名与命名空间刻意**不加**前缀，`using ImageFacade;` 与现有代码不受影响。适配包的包依赖自动变成 `Sevencat.ImageFacade 0.1.0`（已核对 nuspec，两个 TFM 组各一条） |

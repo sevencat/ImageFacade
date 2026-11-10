@@ -1,6 +1,10 @@
 ﻿using ImageFacade.Backends;
 using ImageFacade.OpenCvSharp;
 using Xunit;
+using Cv2 = OpenCvSharp.Cv2;
+using CvMat = OpenCvSharp.Mat;
+using CvRect = OpenCvSharp.Rect;
+using CvScalar = OpenCvSharp.Scalar;
 
 namespace ImageFacade.Tests.OpenCv;
 
@@ -248,6 +252,83 @@ public sealed class OpenCvBackendTests
         }
 
         Assert.Equal(new Rgba32(10, 20, 30), image.GetPixel(0, 0));
+    }
+
+    // ---- Mat 互操作（SharedMat / SubMat / CloneMat） ----
+
+    [Fact]
+    public void SharedMat_Writes_Through_To_The_Image()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(16, 16, Rgba32.White);
+
+        CvMat shared = image.SharedMat();
+        Assert.Equal(16, shared.Cols);
+        Assert.Equal(16, shared.Rows);
+
+        // Scalar 的 v0..v2 依次是 B/G/R，v3 是 alpha（这里要显式给 255，否则画出来是透明的）
+        Cv2.Rectangle(shared, new CvRect(4, 4, 8, 8), new CvScalar(0, 0, 255, 255), thickness: -1);
+
+        Assert.Equal(new Rgba32(255, 0, 0, 255), image.GetPixel(8, 8));
+        Assert.Equal(Rgba32.White, image.GetPixel(0, 0));
+    }
+
+    [Fact]
+    public void SubMat_Shares_Pixels_And_Only_Touches_The_Roi()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(16, 16, Rgba32.White);
+
+        using (CvMat roi = image.SubMat(4, 4, 6, 6))
+        {
+            Assert.Equal(6, roi.Cols);
+            Assert.Equal(6, roi.Rows);
+            roi.SetTo(new CvScalar(0, 255, 0, 255));
+        }
+
+        Assert.Equal(new Rgba32(0, 255, 0, 255), image.GetPixel(4, 4));
+        Assert.Equal(new Rgba32(0, 255, 0, 255), image.GetPixel(9, 9));
+        Assert.Equal(Rgba32.White, image.GetPixel(10, 10));
+    }
+
+    [Theory]
+    [InlineData(-1, 0, 4, 4)]
+    [InlineData(0, -1, 4, 4)]
+    [InlineData(0, 0, 0, 4)]
+    [InlineData(0, 0, 4, 0)]
+    [InlineData(12, 0, 8, 4)]
+    [InlineData(0, 12, 4, 8)]
+    public void SubMat_Out_Of_Bounds_Throws(int x, int y, int width, int height)
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(16, 16, Rgba32.White);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => image.SubMat(x, y, width, height));
+    }
+
+    [Fact]
+    public void CloneMat_Is_Independent_Of_The_Image()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(16, 16, Rgba32.White);
+
+        using CvMat copy = image.CloneMat();
+        Assert.Equal(16, copy.Cols);
+
+        copy.SetTo(new CvScalar(0, 0, 255, 255));
+
+        Assert.Equal(Rgba32.White, image.GetPixel(8, 8));
+        Assert.True(copy.Data != IntPtr.Zero);
+    }
+
+    [Fact]
+    public void SharedMat_After_Dispose_Throws()
+    {
+        using var engine = CreateEngine();
+        FacadeImage image = engine.Create(4, 4, Rgba32.White);
+        image.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => image.SharedMat());
     }
 
 }

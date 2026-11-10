@@ -478,26 +478,19 @@ public sealed class OpenCvBackend : IImageBackend
     public bool TryCopyPixels(IFrame frame, Span<byte> destination, int destinationStride)
     {
         var source = (OpenCvFrame)frame;
+        int width = source.Mat.Cols;
+        int height = source.Mat.Rows;
         unsafe
         {
-            byte* data = (byte*)source.Mat.Data;
-            long step = source.Mat.Step();
-            int width = source.Mat.Cols;
-            int height = source.Mat.Rows;
-            int rowBytes = width * 4;
-
-            for (int y = 0; y < height; y++)
+            fixed (byte* target = destination)
             {
-                byte* row = data + (y * step);
-                Span<byte> target = destination.Slice(y * destinationStride, rowBytes);
-                for (int x = 0; x < width; x++)
-                {
-                    int offset = x * 4;
-                    target[offset] = row[offset + 2];
-                    target[offset + 1] = row[offset + 1];
-                    target[offset + 2] = row[offset];
-                    target[offset + 3] = row[offset + 3];
-                }
+                SwapRedBlue(
+                    (byte*)source.Mat.Data,
+                    (int)source.Mat.Step(),
+                    target,
+                    destinationStride,
+                    width,
+                    height);
             }
         }
 
@@ -507,26 +500,46 @@ public sealed class OpenCvBackend : IImageBackend
     public void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride)
     {
         var target = (OpenCvFrame)frame;
+        int width = target.Mat.Cols;
+        int height = target.Mat.Rows;
         unsafe
         {
-            byte* data = (byte*)target.Mat.Data;
-            long step = target.Mat.Step();
-            int width = target.Mat.Cols;
-            int height = target.Mat.Rows;
-            int rowBytes = width * 4;
-
-            for (int y = 0; y < height; y++)
+            fixed (byte* pixels = source)
             {
-                ReadOnlySpan<byte> row = source.Slice(y * sourceStride, rowBytes);
-                byte* destination = data + (y * step);
-                for (int x = 0; x < width; x++)
-                {
-                    int offset = x * 4;
-                    destination[offset] = row[offset + 2];
-                    destination[offset + 1] = row[offset + 1];
-                    destination[offset + 2] = row[offset];
-                    destination[offset + 3] = row[offset + 3];
-                }
+                SwapRedBlue(
+                    pixels,
+                    sourceStride,
+                    (byte*)target.Mat.Data,
+                    (int)target.Mat.Step(),
+                    width,
+                    height);
+            }
+        }
+    }
+
+    /// <summary>
+    /// RGBA32 ↔ BGRA 的通道交换（R↔B，A 直通）。交换是对合运算，导入与导出共用这一份实现。
+    /// 两侧各按自己的 stride 走行，因此源/目标可以是不连续的 <c>Mat</c>，也可以是带填充的外部缓冲。
+    /// </summary>
+    private static unsafe void SwapRedBlue(
+        byte* source,
+        int sourceStride,
+        byte* destination,
+        int destinationStride,
+        int width,
+        int height)
+    {
+        int rowBytes = width * 4;
+        for (int y = 0; y < height; y++)
+        {
+            byte* row = source + (y * sourceStride);
+            byte* output = destination + (y * destinationStride);
+            for (int offset = 0; offset < rowBytes; offset += 4)
+            {
+                output[offset] = row[offset + 2];
+                output[offset + 1] = row[offset + 1];
+                output[offset + 2] = row[offset];
+                output[offset + 3] = row[offset + 3];
             }
         }
     }

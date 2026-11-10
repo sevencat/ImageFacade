@@ -9,7 +9,10 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionPrefix>0.2</VersionPrefix>
+
+    <!-- 包名统一加 Sevencat. 前缀；工程名 = 包名主干 -->
+    <PackageId>Sevencat.$(MSBuildProjectName)</PackageId>
 
     <!-- 打包策略：本仓库的 src 工程发布到 NuGet（7 个包，同版本号）；
          tests/samples/benchmarks 各自设 IsPackable=false。

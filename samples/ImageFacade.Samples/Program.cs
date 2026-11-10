@@ -6,6 +6,13 @@ using ImageFacade.OpenCvSharp;
 using ImageFacade.Pipeline;
 using ImageFacade.SkiaSharp;
 using ImageFacade.SdcbSimdCodecs;
+using Cv2 = OpenCvSharp.Cv2;
+using CvInterpolationFlags = OpenCvSharp.InterpolationFlags;
+using CvMat = OpenCvSharp.Mat;
+using CvPoint = OpenCvSharp.Point;
+using CvRect = OpenCvSharp.Rect;
+using CvScalar = OpenCvSharp.Scalar;
+using CvSize = OpenCvSharp.Size;
 
 // 示例集：生成 README 用的截图，同时充当跨后端的冒烟测试。
 // 输出固定写到仓库根的 docs/images，与当前工作目录无关。
@@ -42,6 +49,7 @@ RunResizeModes(outputDirectory);
 RunTextLayout(outputDirectory);
 RunWatermark(outputDirectory);
 RunPipeline(new SkiaBackend(), "skia", outputDirectory);
+RunOpenCvInterop(outputDirectory);
 
 Console.WriteLine("ok");
 
@@ -374,6 +382,53 @@ static void RunPipeline(IImageBackend backend, string label, string outputDirect
     string path = Path.Combine(outputDirectory, "pipeline-detection.png");
     frame.Save(path);
     Console.WriteLine($"[{label}] saved      = {path}");
+}
+
+// ---------------------------------------------------------------------------
+// 6) OpenCV Mat 互操作：SharedMat / SubMat / CloneMat
+// ---------------------------------------------------------------------------
+// 三种拿法共用一句话：SharedMat 与 SubMat 写进去就是写原图，CloneMat 是独立副本。
+static void RunOpenCvInterop(string outputDirectory)
+{
+    using var engine = new ImageEngine(new OpenCvBackend());
+    using FacadeImage image = engine.Create(900, 460, Rgba32.White);
+
+    image.FillRectangle(new RectF(0, 0, 900, 8), Rgba32.FromHex(0x2060C0));
+
+    var title = new TextStyle { Font = FontRef.BuiltIn, Size = 24, Color = Rgba32.FromHex(0x141414) };
+    var caption = new TextStyle { Font = FontRef.BuiltIn, Size = 16, Color = Rgba32.FromHex(0x444444) };
+
+    image.DrawText("OpenCV Mat 互操作", new PointF(28, 24), title);
+
+    // ① SharedMat：拿到的就是后端保存的那块 BGRA Mat。Cv2 画什么，这张图就多什么。
+    //    Scalar 的 v0..v2 是 B/G/R，v3 是 alpha —— 不写 255 会画成透明。
+    CvMat shared = image.SharedMat();
+    Cv2.Rectangle(shared, new CvRect(40, 120, 240, 160), new CvScalar(0, 0, 255, 255), thickness: 4);
+    Cv2.Circle(shared, new CvPoint(160, 200), 40, new CvScalar(0, 200, 0, 255), thickness: -1);
+    Cv2.Line(shared, new CvPoint(40, 320), new CvPoint(280, 320), new CvScalar(255, 0, 0, 255), thickness: 4);
+
+    image.DrawText("① SharedMat → Cv2 直接画在帧上", new PointF(40, 88), caption);
+    image.DrawText("② CloneMat → 副本独立，改它原图不变", new PointF(40, 344), caption);
+    image.DrawText("③ SubMat → 把副本缩略贴进 ROI，只改这块", new PointF(470, 88), caption);
+
+    // ② CloneMat：深拷贝，在副本上画一圈很粗的红框。
+    using CvMat copy = image.CloneMat();
+    Cv2.Rectangle(copy, new CvRect(0, 0, copy.Cols, copy.Rows), new CvScalar(0, 0, 255, 255), thickness: 12);
+
+    // ③ SubMat：把副本缩小后贴回右下角。写入的是 ROI，原图其它区域不受影响。
+    using var thumb = new CvMat();
+    Cv2.Resize(copy, thumb, new CvSize(400, 204), interpolation: CvInterpolationFlags.Area);
+    using (CvMat roi = image.SubMat(470, 130, 400, 204))
+    {
+        thumb.CopyTo(roi);
+    }
+
+    image.DrawText("缩略图 = CloneMat 副本（带红框），原图无红框。",
+        new PointF(470, 348), caption);
+
+    string path = Path.Combine(outputDirectory, "opencv-interop.png");
+    image.Save(path);
+    Console.WriteLine($"saved      = {path}");
 }
 
 // ---------------------------------------------------------------------------
