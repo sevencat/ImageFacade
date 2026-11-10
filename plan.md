@@ -593,9 +593,10 @@ public sealed class TensorBuffer : IDisposable
 /// <summary>letterbox 帮助函数：返回新图 + 几何信息，源图不变。</summary>
 public static class Letterbox
 {
+    // 注意：out 参数不能排在可选参数之后，所以 info 放在第三位。
     public static FacadeImage Apply(this FacadeImage source, int width, int height,
-                                    Rgba32? padColor = null, bool center = true,
-                                    out LetterboxInfo info);
+                                    out LetterboxInfo info,
+                                    Rgba32? padColor = null, bool center = true);
     public static FacadeImage Apply(this FacadeImage source, LetterboxOptions options,
                                     out LetterboxInfo info);
 }
@@ -604,8 +605,9 @@ public sealed class LetterboxOptions
 {
     public int Width { get; init; }
     public int Height { get; init; }
-    public Rgba32 PadColor { get; init; } = new(114, 114, 114);
+    public Rgba32 PadColor { get; init; } = new(114, 114, 114);   // 与 Letterbox.DefaultPadColor 一致
     public bool Center { get; init; } = true;
+    public Sampler Sampler { get; init; } = Sampler.Bicubic;       // 缩放核，默认 Bicubic
 }
 
 public readonly struct Detection
@@ -1119,7 +1121,7 @@ f:/code/ImageFacade/
       Text/Engine/{TrueTypeFont,TrueTypeFont.Glyphs,GlyphOutline,GlyphRasterizer,GlyphMask,GlyphPath,PathCollection,TextLayout}.cs
       Options/{LoadOptions,SaveOptions,ResizeOptions}.cs   # ResizeMode / Sampler 也在 ResizeOptions.cs
       Pixels/{PixelConverter,PixelTransforms}.cs
-      Pipeline/**                      # M7：Letterbox / Nms / Tensorizer / Detection*（尚未落地）
+      Pipeline/**                      # Letterbox / Tensorizer / TensorBuffer / Nms / Detection*
       FacadeImage.cs  ImageEngine.cs  Exceptions.cs  DisposableCollection.cs  Font.cs  Font.Layout.cs
       Internal/{AsyncBridge,ResizePlanner,TextLayouter}.cs
       Fonts/WenQuanYiMicroHei.ttf.gz

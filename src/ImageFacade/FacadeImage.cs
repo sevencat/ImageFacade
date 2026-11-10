@@ -47,6 +47,9 @@ public sealed class FacadeImage : IDisposable
 
     internal IImageBackend Backend => _backend;
 
+    /// <summary>Pipeline（letterbox / 张量化）需要借同一个引擎造临时图。</summary>
+    internal ImageEngine Engine => _engine;
+
     // ---- 尺寸 ----
 
     /// <summary>纯拉伸（等价于 <see cref="ResizeMode.Stretch"/>）。</summary>

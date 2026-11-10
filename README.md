@@ -17,10 +17,8 @@
 | SkiaSharp 适配（编译目标 3.119.1，可提升到 4.x） | 已实现 |
 | ImageSharp 3.1 / 2.1 适配 | 已实现 |
 | OpenCvSharp 4.13 / 5.0 适配 | 已实现 |
-| `ImageFacade.Pipeline`（letterbox、张量化、NMS、检测框绘制，**在核心包内**，不单独成包） | **未实现**（plan.md M7） |
+| `ImageFacade.Pipeline`（letterbox、张量化、NMS、检测框绘制，**在核心包内**，不单独成包） | 已实现 |
 | 跨后端一致性套件、benchmark、CI | 未实现 |
-
-> `ImageFacade.Pipeline` 尚未落地，因此本文不含张量化 / NMS / `DrawDetections` 的用法示例。设计见 [plan.md](plan.md) 第 4.6 节。
 
 ---
 
@@ -30,7 +28,7 @@
 src/
   ImageFacade/                     # 核心：契约 + 路由 + 排版 + 内置字体，无编解码依赖
   ImageFacade.SdcbSimdCodecs/      # 软后端：ImgProcSharp 渲染层 + Sdcb.SimdCodecs 编解码
-  ImageFacade.SkiaSharp/           # SkiaSharp 4.x（唯一 Skia 版本）
+  ImageFacade.SkiaSharp/           # SkiaSharp 3.119（编译目标，兼容 4.x）
   ImageFacade.ImageSharp/          # ImageSharp 3.x + Drawing 2.x
   ImageFacade.ImageSharp2/         # ImageSharp 2.x + Drawing 1.x（链接上一份源码）
   ImageFacade.OpenCvSharp/         # OpenCvSharp4
@@ -170,6 +168,55 @@ byte[] bytes = await image.EncodeAsync(cancellationToken: ct);
 ```
 
 ---
+
+## 检测流水线
+
+`ImageFacade.Pipeline` 在核心包内，不依赖任何推理库：它只负责"把帧变成模型输入"和"把模型输出画回帧"这两段，中间跑什么模型由你决定。
+
+```csharp
+using ImageFacade;
+using ImageFacade.Pipeline;
+
+// 1) letterbox：源图不变，返回新图 + 反算几何
+using FacadeImage padded = frame.Apply(640, 640, out LetterboxInfo info);
+// 1280x720 -> 640x640：info.Scale = 0.5，info.PadTop = 140
+
+// 2) 张量化：NCHW + RGB + 归一到 0..1，写入池化缓冲
+var options = new TensorOptions { Width = 640, Height = 640 };
+using TensorBuffer tensor = TensorBuffer.Rent(640 * 640 * 3);
+frame.ToTensor(options, tensor.Span, out _);
+// tensor.Memory 可直接交给 onnxruntime
+
+// 3) 假设模型返回了模型坐标下的框
+Span<Detection> detections = /* 从模型输出解码 */;
+
+// 4) NMS：原地抑制，返回保留数量
+int kept = Nms.Suppress(detections, iouThreshold: 0.45f);
+
+// 5) 反算回源图坐标，再画到**源帧**上
+var onSource = new Detection[kept];
+for (int i = 0; i < kept; i++)
+{
+    Detection detection = detections[i];
+    onSource[i] = new Detection(info.ToSource(detection.Box), detection.Label, detection.Score)
+    {
+        ClassId = detection.ClassId,
+    };
+}
+
+frame.DrawDetections(onSource);
+```
+
+要点：
+
+- `Apply` **不改源图**，所以画框可以直接画在源帧上，坐标不用二次换算。
+- `LetterboxInfo.ToSource` 是唯一的反算入口；手写 `(x - pad) / scale` 容易把顺序写反。
+- 张量缓冲用 `TensorBuffer.Rent` 池化：640×640×3 是 4.9 MB，每帧新分配会直接进 LOH。
+- `Nms.Suppress` 是原地的：返回保留数量，有效段是 `detections[..kept]`，结果与输入顺序无关；`Nms.Select` 则返回原数组下标。
+- `DrawDetections` 只是默认排版，标签宽度走 `MeasureText`，因此与当前后端的字体度量自洽；要别的排版就自己循环 `DrawRectangle` + `FillRectangle` + `DrawText`。
+- OpenCV 后端不支持半透明形状：`DetectionStyle.LabelBackground` 默认的 `(0,0,0,160)` 会抛 `FeatureNotSupportedException`，需要改成不透明色。
+
+完整可运行的版本在 `samples/ImageFacade.Samples`（`RunPipeline`），输出 `artifacts/pipeline-skia.png`。
 
 ## 后端能力矩阵
 
