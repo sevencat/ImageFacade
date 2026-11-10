@@ -13,10 +13,12 @@
     <PackageVersion Include="Sdcb.SimdCodecs.Jpeg" Version="2.0.0" />
     <PackageVersion Include="Sdcb.SimdCodecs.Bmp" Version="2.0.0" />
 
-    <!-- 适配包：当前主版本 -->
-    <PackageVersion Include="SkiaSharp" Version="4.155.0" />
-    <!-- 原生资产按 RID 引用：适配包不引，由应用/测试决定 -->
-    <PackageVersion Include="SkiaSharp.NativeAssets.Win32" Version="4.155.0" />
+    <!-- 适配包：SkiaSharp 以 3.119.1 为编译目标。
+         4.x 保留了 3.x 的全部 API（SKPath 的写 API 与 4 参 DrawBitmap 只是标记过时，未删除），
+         所以用 3.x 编译的包在使用方把 SkiaSharp 提升到 4.x 时仍能运行；反过来不成立。 -->
+    <PackageVersion Include="SkiaSharp" Version="3.119.1" />
+    <!-- 原生资产按 RID 引用：适配包不引，由应用/测试决定；版本必须与托管包一致 -->
+    <PackageVersion Include="SkiaSharp.NativeAssets.Win32" Version="3.119.1" />
     <PackageVersion Include="OpenCvSharp4" Version="4.13.0.20261107" />
     <PackageVersion Include="OpenCvSharp4.runtime.win" Version="4.13.0.20261107" />
     <PackageVersion Include="OpenCvSharp5.runtime.win" Version="5.0.0.20261109" />

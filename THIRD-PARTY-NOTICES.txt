@@ -1,0 +1,102 @@
+================================================================================
+THIRD-PARTY NOTICES - ImageFacade
+================================================================================
+
+本文件列出 ImageFacade 仓库（下称"本仓库"）使用、引用或随源码分发的第三方
+组件及其许可证。本仓库自身以 Apache License 2.0 发布，全文见根目录 LICENSE。
+
+本仓库自身发布到 NuGet（7 个包，同版本号 0.1.0）。第三方库一律以
+PackageReference 作为传递依赖，其二进制与源码不随本仓库的包分发；唯一的
+例外是 ImgProcSharp——它按 Apache-2.0 复制源码进 ImageFacade.SdcbSimdCodecs
+（见第一节）。因此下文"仅引用"的组件不会被本仓库重新分发，其许可证义务由
+最终使用方按自己的引用方式承担。
+
+本文件随每个包一起分发（与 README.md、licenses/ 并列在包根目录）。
+
+--------------------------------------------------------------------------------
+一、随本仓库源码/包分发的第三方内容
+--------------------------------------------------------------------------------
+
+1. ImgProcSharp
+   许可证   : Apache License 2.0
+   使用方式 : 源码复制并改造（非 NuGet 引用、非二进制转发）
+   位置     : src/ImageFacade.SdcbSimdCodecs/Rendering/
+              命名空间 ImageFacade.SdcbSimdCodecs.Rendering，全部类型 internal
+   范围     : 复制与改造清单见 misc.md 第 Q 节、第 Y 节；仅复制其 Core
+              （画布、绘制、光栅化、重采样、路径、画笔、颜色等渲染代码），
+              不复制的部分（其 SimdCodecs 门面、Image 类型、字体资源）见该节
+   说明     : 上游版权归 ImgProcSharp 作者所有；本仓库的改动是命名空间调整、
+              可见性收紧、删除打包属性与内嵌字体资源，以及接入本仓库的字体
+              引擎。上游快照版本见 misc.md 第 Z 节的落地记录。同步上游版本时
+              必须同步更新本条记录。
+
+2. WenQuanYi Micro Hei（文泉驿微米黑）
+   许可证   : Apache License 2.0 / GNU GPL v3 双许可，附字体嵌入例外
+              (Font Embedding Exception)
+   使用分支 : Apache License 2.0
+   位置     : src/ImageFacade/Fonts/WenQuanYiMicroHei.ttf.gz
+   分发方式 : 以 EmbeddedResource 嵌入 ImageFacade 程序集
+              (LogicalName = ImageFacade.Fonts.WenQuanYiMicroHei.ttf.gz)，
+              运行时首次访问 Font.BuiltIn 时解压并解析
+   许可证文件: licenses/LICENSE-WenQuanYiMicroHei.txt
+   说明     : 该字体使本库在没有系统字体的环境（容器、AOT、CI）下也能绘制
+              中文。若移除或替换该字体，须同步更新本条与本文件。
+
+--------------------------------------------------------------------------------
+二、通过 NuGet 引用、不随本仓库分发的第三方组件
+--------------------------------------------------------------------------------
+
+组件                                     许可证                引用位置
+---------------------------------------  --------------------  ------------------------------
+SkiaSharp 3.119.1                        MIT                   ImageFacade.SkiaSharp
+  （编译目标；使用方可将 SkiaSharp 提升到 4.x，4.x 兼容 3.x 的 API）
+Skia（native，由 SkiaSharp 的 RID 包带来） BSD-3-Clause         同上（由应用按 RID 引用）
+OpenCvSharp4 4.13.0.20261107             Apache License 2.0    ImageFacade.OpenCvSharp
+OpenCV 4.13（native，RID 包）             Apache License 2.0    同上（由应用按 RID 引用）
+OpenCvSharp5 5.0.0.20261109              Apache License 2.0    ImageFacade.OpenCvSharp5
+OpenCV 5.0（native，RID 包）              Apache License 2.0    同上（由应用按 RID 引用）
+SixLabors.ImageSharp 3.1.12 / 2.1.13     Six Labors Split      见下方第三节
+SixLabors.ImageSharp.Drawing            
+  2.1.3 / 1.0.0                          Six Labors Split      见下方第三节
+SixLabors.Fonts（传递引用）               Six Labors Split      见下方第三节
+Sdcb.SimdCodecs 2.0.0                    MIT                   ImageFacade.SdcbSimdCodecs
+Sdcb.SimdCodecs.Abstractions 2.0.0       MIT                   同上
+Sdcb.SimdCodecs.Png / .Jpeg / .Bmp       MIT                   同上
+  2.0.0
+
+以上版本号与 Directory.Packages.props 保持一致；升级依赖时须同步本表。
+
+--------------------------------------------------------------------------------
+三、特别提示：SixLabors.ImageSharp 许可证
+--------------------------------------------------------------------------------
+
+ImageSharp 自 2.0 起不再使用 Apache License 2.0，改为 Six Labors Split
+License（分为开源与商业两档）。本仓库只做 PackageReference，不转发其源码或
+二进制，但**使用本库的 ImageSharp 适配工程（ImageFacade.ImageSharp /
+ImageFacade.ImageSharp2）会让你的项目直接依赖 ImageSharp**。
+
+使用方须自行确认授权条件是否适用于自己的使用场景；不适用时请改用
+ImageFacade.SkiaSharp 或 ImageFacade.SdcbSimdCodecs 后端——这正是本库不把
+ImageSharp 设为默认后端的原因。许可证原文以 Six Labors 官方发布为准。
+
+--------------------------------------------------------------------------------
+四、实现来源声明
+--------------------------------------------------------------------------------
+
+- 本库的公开 API 形状参考了 SkiaSharp、ImageSharp.Drawing、OpenCV 的公开
+  文档与示例；ImgProcSharp 为 Apache-2.0 项目，按第一节的方式复制并改造。
+- 未反编译、未逐行对照任何第三方实现。跨后端的语义差异通过一致性测试暴露，
+  不依赖"看起来一样"的判断。
+- 各后端的行为差异记录在 misc.md 第 E 节（能力矩阵）、第 F 至第 J 节
+  （逐库的坑与已知差异）。
+
+--------------------------------------------------------------------------------
+五、维护要求
+--------------------------------------------------------------------------------
+
+- 新增任何第三方依赖、复制任何第三方源码、内嵌任何第三方资源时，必须同步
+  更新本文件，并在 plan.md 第 9 节"工程"验收项中复核。
+- 删除依赖时同样要删条目，避免声明与实际不一致。
+- 本文件是声明性记录，不是许可证原文的集合；各许可证原文以对应上游发布为
+  准，随分发必须原样提供。
+================================================================================

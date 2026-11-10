@@ -227,6 +227,23 @@ public sealed class FacadeImage : IDisposable
         return TextLayouter.Layout(this, text, style).Size;
     }
 
+    /// <summary>
+    /// ImageSharp 风格的原地作用域：把一串 <see cref="FacadeImage"/> 调用收进一个 lambda。
+    /// </summary>
+    /// <remarks>
+    /// 纯语法糖：<c>img.Mutate(x => x.DrawLine(...))</c> 与直接 <c>img.DrawLine(...)</c> 完全等价——
+    /// <see cref="FacadeImage"/> 的每个 <c>Draw*</c> 本身就地修改像素并返回 <c>this</c>，
+    /// 不需要 ImageSharp 的 <c>IImageProcessingContext</c>（那个上下文存在的目的是避免中间副本）。
+    /// 后端不受影响：ImageSharp 后端在自己的 <c>Try*</c> 里照旧调 <c>Image.Mutate(...)</c>。
+    /// </remarks>
+    public FacadeImage Mutate(Action<FacadeImage> draw)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(draw);
+        draw(this);
+        return this;
+    }
+
     // ---- 生命周期 ----
 
     public FacadeImage Clone()
@@ -234,6 +251,26 @@ public sealed class FacadeImage : IDisposable
         ThrowIfDisposed();
         IFrame copy = _backend.Clone(Frame);
         return new FacadeImage(_engine, _backend, copy, _metadata);
+    }
+
+    /// <summary>
+    /// ImageSharp 风格的 <c>Clone(x => ...)</c>：先复制一份，在副本上执行 <paramref name="draw"/>，返回副本。
+    /// 原图不受影响；回调抛异常时副本会被释放。
+    /// </summary>
+    public FacadeImage Clone(Action<FacadeImage> draw)
+    {
+        ArgumentNullException.ThrowIfNull(draw);
+        FacadeImage copy = Clone();
+        try
+        {
+            draw(copy);
+            return copy;
+        }
+        catch
+        {
+            copy.Dispose();
+            throw;
+        }
     }
 
     // ---- 输出 ----

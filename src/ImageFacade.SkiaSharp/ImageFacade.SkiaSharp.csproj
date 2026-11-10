@@ -4,7 +4,7 @@
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade.SkiaSharp</AssemblyName>
     <RootNamespace>ImageFacade.SkiaSharp</RootNamespace>
-    <DefineConstants>$(DefineConstants);SKIA4</DefineConstants>
+    <Description>ImageFacade 的 SkiaSharp 4.x 后端：原生绘制、文字与 alpha 混合，视频帧叠加的首选后端。</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 

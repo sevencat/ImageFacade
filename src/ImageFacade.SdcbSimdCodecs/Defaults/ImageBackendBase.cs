@@ -1,16 +1,18 @@
 using System.Buffers;
+using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using ImageFacade.Backends;
 using Sdcb.SimdCodecs.Abstractions;
-using Sdcb.SimdCodecs.Bmp;
-using Sdcb.SimdCodecs.Jpeg;
-using Sdcb.SimdCodecs.Png;
 using SdcbImageFormat = Sdcb.SimdCodecs.Abstractions.ImageFormat;
+using SdcbImageMetadata = Sdcb.SimdCodecs.Abstractions.ImageMetadata;
 using SdcbPixelFormat = Sdcb.SimdCodecs.Abstractions.PixelFormat;
 
 namespace ImageFacade.Backends;
 
 /// <summary>
-/// 只负责"加载 / 保存"的后端基类：解码与编码统一走 Sdcb.SimdCodecs 2.0（Abstractions + 按格式包）。
+/// 只负责"加载 / 保存"的后端基类：编解码**只依赖 <c>Sdcb.SimdCodecs.Abstractions</c>** 的抽象
+/// （<see cref="ImageDecoderRegistration"/> / <see cref="ImageEncoderRegistration"/>），不引用任何
+/// 具体格式包、也不引用 <c>Sdcb.SimdCodecs</c> 聚合门面。具体格式由 <see cref="RegisterCodec"/> 注册。
 /// </summary>
 /// <remarks>
 /// <para>
@@ -18,32 +20,73 @@ namespace ImageFacade.Backends;
 /// 像素读写（<see cref="TryCopyPixels"/> / <see cref="ImportPixels"/>）与绘制能力（默认全部不支持）。
 /// </para>
 /// <para>
-/// 接入新格式：加一个 <c>Sdcb.SimdCodecs.Xxx</c> 包，把它的 <c>XxxImageDecoder.Registration</c>
-/// 加进 <see cref="Decoders"/>，并在 <see cref="Encode"/> 里补一个分支。
+/// 接入新格式：在软后端包（或其他使用方）加一个 <c>Sdcb.SimdCodecs.Xxx</c> 包，调用一次
+/// <see cref="RegisterCodec"/> 即可，基类不需要改。软后端自带的 PNG/JPEG/BMP 在
+/// <c>SoftwareCodecs</c> 的模块初始化器里注册。
 /// </para>
 /// </remarks>
 public abstract class ImageBackendBase : IImageBackend
 {
-    private static readonly ImageDecoderRegistration[] Decoders =
-    [
-        PngImageDecoder.Registration,
-        JpegImageDecoder.Registration,
-        BmpImageDecoder.Registration,
-    ];
+    private static readonly ConcurrentDictionary<ImageFormat, ImageDecoderRegistration> s_decoders = new();
+    private static readonly ConcurrentDictionary<ImageFormat, EncoderEntry> s_encoders = new();
+    private static readonly object s_sync = new();
 
-    private static readonly IReadOnlySet<ImageFormat> DecodableFormats = new HashSet<ImageFormat>
-    {
-        ImageFormat.Png,
-        ImageFormat.Jpeg,
-        ImageFormat.Bmp,
-    };
+    private static IReadOnlySet<ImageFormat> s_decodeFormats = FrozenSet<ImageFormat>.Empty;
+    private static IReadOnlySet<ImageFormat> s_encodeFormats = FrozenSet<ImageFormat>.Empty;
 
-    private static readonly IReadOnlySet<ImageFormat> EncodableFormats = new HashSet<ImageFormat>
+    // ---- 编解码注册 ----
+
+    /// <summary>
+    /// 注册一个格式的解码器与编码器。可在任意线程调用；建议在启动阶段完成
+    /// （软后端用自己的模块初始化器自动注册 PNG/JPEG/BMP）。
+    /// </summary>
+    /// <param name="format">门面格式。</param>
+    /// <param name="decoder">Abstractions 的解码器注册（来自具体格式包，如 <c>PngImageDecoder.Registration</c>）。</param>
+    /// <param name="encoder">Abstractions 的编码器注册。</param>
+    /// <param name="encodeOptions">
+    /// 把门面的 <see cref="EncodeRequest"/> 映射成具体格式的 <see cref="EncodeOptions"/>；
+    /// 返回 null 表示用该格式的默认选项。基类不引用任何格式的 options 类型，所以这个工厂由注册方提供。
+    /// </param>
+    public static void RegisterCodec(
+        ImageFormat format,
+        ImageDecoderRegistration decoder,
+        ImageEncoderRegistration encoder,
+        Func<EncodeRequest, EncodeOptions?>? encodeOptions = null)
     {
-        ImageFormat.Png,
-        ImageFormat.Jpeg,
-        ImageFormat.Bmp,
-    };
+        ArgumentNullException.ThrowIfNull(decoder);
+        ArgumentNullException.ThrowIfNull(encoder);
+
+        s_decoders[format] = decoder;
+        s_encoders[format] = new EncoderEntry(encoder, encodeOptions);
+        RefreshFormats();
+    }
+
+    /// <summary>只注册解码器（编码仍不支持该格式）。</summary>
+    public static void RegisterDecoder(ImageFormat format, ImageDecoderRegistration decoder)
+    {
+        ArgumentNullException.ThrowIfNull(decoder);
+        s_decoders[format] = decoder;
+        RefreshFormats();
+    }
+
+    /// <summary>只注册编码器（解码仍不支持该格式）。</summary>
+    public static void RegisterEncoder(
+        ImageFormat format,
+        ImageEncoderRegistration encoder,
+        Func<EncodeRequest, EncodeOptions?>? encodeOptions = null)
+    {
+        ArgumentNullException.ThrowIfNull(encoder);
+        s_encoders[format] = new EncoderEntry(encoder, encodeOptions);
+        RefreshFormats();
+    }
+
+    /// <summary>清空全部注册（主要给测试用：验证"没注册就抛"）。</summary>
+    public static void ClearCodecs()
+    {
+        s_decoders.Clear();
+        s_encoders.Clear();
+        RefreshFormats();
+    }
 
     public abstract string Name { get; }
 
@@ -51,9 +94,9 @@ public abstract class ImageBackendBase : IImageBackend
 
     public abstract BackendCapabilities Capabilities { get; }
 
-    public virtual IReadOnlySet<ImageFormat> SupportedDecodeFormats => DecodableFormats;
+    public virtual IReadOnlySet<ImageFormat> SupportedDecodeFormats => s_decodeFormats;
 
-    public virtual IReadOnlySet<ImageFormat> SupportedEncodeFormats => EncodableFormats;
+    public virtual IReadOnlySet<ImageFormat> SupportedEncodeFormats => s_encodeFormats;
 
     // ---- 派生类必须提供 ----
 
@@ -120,7 +163,7 @@ public abstract class ImageBackendBase : IImageBackend
     public IFrame Decode(ReadOnlySpan<byte> data, in DecodeRequest request, out ImageMetadata metadata)
     {
         ImageDecoderRegistration codec = FindDecoder(data)
-            ?? throw new ImageBackendException(Name, "无法识别的图像格式，或该格式的解码器未注册。");
+            ?? throw new FeatureNotSupportedException("Decode", Name);
 
         if (!codec.TryReadInfo(data, out ImageInfo info))
         {
@@ -172,6 +215,11 @@ public abstract class ImageBackendBase : IImageBackend
     {
         ArgumentNullException.ThrowIfNull(destination);
 
+        if (!s_encoders.TryGetValue(request.Format, out EncoderEntry entry))
+        {
+            throw new FeatureNotSupportedException("Encode", Name);
+        }
+
         int width = frame.Width;
         int height = frame.Height;
         int stride = width * 4;
@@ -184,20 +232,11 @@ public abstract class ImageBackendBase : IImageBackend
                 throw new ImageBackendException(Name, "导出像素失败，无法编码。");
             }
 
-            byte[] encoded = request.Format switch
-            {
-                ImageFormat.Png => PngWriter.Encode(straight, width, height, new PngWriteOptions()),
-                ImageFormat.Jpeg => JpegEncoder.Encode(
-                    straight,
-                    width,
-                    height,
-                    4,
-                    new JpegEncodeOptions { Quality = Math.Clamp(request.Quality, 1, 100) }),
-                ImageFormat.Bmp => BmpEncoder.Encode(straight, width, height, SdcbPixelFormat.Rgba32, new BmpEncodeOptions(), 0),
-                _ => throw new NotSupportedException($"软后端目前只支持 PNG / JPEG / BMP 编码（请求：{request.Format}）。"),
-            };
-
-            destination.Write(encoded, 0, encoded.Length);
+            EncodeWith(entry, straight, width, height, stride, in request, destination);
+        }
+        catch (FeatureNotSupportedException)
+        {
+            throw;
         }
         catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException or ArgumentException)
         {
@@ -207,6 +246,35 @@ public abstract class ImageBackendBase : IImageBackend
         {
             ArrayPool<byte>.Shared.Return(pixels);
         }
+    }
+
+    /// <summary>
+    /// 用 Abstractions 的编码会话写出一帧：<c>Create → AddFrame → WriteRows → Commit</c>。
+    /// 只依赖抽象，具体格式的 writer 不需要出现在这里。
+    /// </summary>
+    private void EncodeWith(
+        EncoderEntry entry,
+        ReadOnlySpan<byte> straight,
+        int width,
+        int height,
+        int stride,
+        in EncodeRequest request,
+        Stream destination)
+    {
+        var writer = new ArrayBufferWriter<byte>(Math.Max(1024, width * height));
+        IImageEncoderSession session = entry.Registration.Create(writer, entry.OptionsFactory?.Invoke(request));
+        IImageFrameEncoder frame = session.AddFrame(
+            width,
+            height,
+            SdcbPixelFormat.Rgba32,
+            ColorEncoding.AssumedSrgb,
+            SdcbImageMetadata.Empty,
+            duration: null);
+
+        frame.WriteRows(straight, height, stride, CancellationToken.None);
+        session.Commit(CancellationToken.None);
+
+        destination.Write(writer.WrittenSpan);
     }
 
     private IFrame Import(ReadOnlySpan<byte> pixels, int width, int height)
@@ -226,15 +294,24 @@ public abstract class ImageBackendBase : IImageBackend
 
     private static ImageDecoderRegistration? FindDecoder(ReadOnlySpan<byte> data)
     {
-        foreach (ImageDecoderRegistration codec in Decoders)
+        foreach (KeyValuePair<ImageFormat, ImageDecoderRegistration> pair in s_decoders)
         {
-            if (codec.CanDecode(data))
+            if (pair.Value.CanDecode(data))
             {
-                return codec;
+                return pair.Value;
             }
         }
 
         return null;
+    }
+
+    private static void RefreshFormats()
+    {
+        lock (s_sync)
+        {
+            s_decodeFormats = s_decoders.Keys.ToFrozenSet();
+            s_encodeFormats = s_encoders.Keys.ToFrozenSet();
+        }
     }
 
     private static ImageFormat MapFormat(SdcbImageFormat format) => format switch
@@ -254,4 +331,8 @@ public abstract class ImageBackendBase : IImageBackend
     public virtual void Dispose()
     {
     }
+
+    private readonly record struct EncoderEntry(
+        ImageEncoderRegistration Registration,
+        Func<EncodeRequest, EncodeOptions?>? OptionsFactory);
 }

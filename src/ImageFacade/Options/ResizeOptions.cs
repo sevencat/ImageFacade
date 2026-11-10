@@ -47,7 +47,4 @@ public sealed class ResizeOptions
 
     /// <summary>Crop 之外的补边颜色。</summary>
     public Rgba32 PadColor { get; init; } = Rgba32.Transparent;
-
-    /// <summary>后端采样核映射不精确时（例如 Skia 没有真 Lanczos）改走软后端。</summary>
-    public bool PreferExactSampler { get; init; }
 }

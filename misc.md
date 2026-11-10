@@ -19,8 +19,8 @@
 | 采样器 | `Sampler` | ImageSharp 叫 `IResampler`/`KnownResamplers`，这里是枚举，叫 `Resampler` 会和"对象"混淆 |
 | 描边 | `StrokeStyle` | 与 `System.Drawing.Drawing2D` / WPF 的命名习惯一致；`PenStyle` 容易和颜色混淆 |
 | ~~回退模式~~ | ~~`FallbackMode`~~ | **2026-11 删除**：取消跨后端回退后只剩"原生成功 / 抛 `FeatureNotSupportedException`"两档，不再有模式开关 |
-| 包名 | `ImageFacade.*` | 与命名空间同根；`ImageFacade.Core` 多余（核心就是 `ImageFacade`） |
-| 主版本包名 | 无后缀 = 当前主版本；数字后缀 = 指定主版本 | `ImageFacade.SkiaSharp`（4.x）/ `.SkiaSharp3`（3.x）；`.OpenCvSharp`（4.x）/ `.OpenCvSharp5`（5.x）；`.ImageSharp`（3.x）/ `.ImageSharp2`（2.x） |
+| 工程名 | `ImageFacade.*` | 与命名空间同根；`ImageFacade.Core` 多余（核心就是 `ImageFacade`） |
+| 主版本工程名 | 无后缀 = 当前主版本；数字后缀 = 指定的另一主版本 | `ImageFacade.SkiaSharp`（只有 4.x，故无 `SkiaSharp3`）；`.OpenCvSharp`（4.x）/ `.OpenCvSharp5`（5.x）；`.ImageSharp`（3.x）/ `.ImageSharp2`（2.x） |
 | 软件后端 | 独立包 `ImageFacade.SdcbSimdCodecs` | 核心保持零编解码依赖；`ImageBackendBase`（只做加载/保存）与 `SoftwareBackend`（完整渲染）都在 Software 包里 |
 
 公开 API 全部在根命名空间 `ImageFacade`；只有 SPI（后端作者才需要）放 `ImageFacade.Backends`。使用方通常只需 `using ImageFacade;` 和 `using ImageFacade.SkiaSharp;` 两条。
@@ -53,8 +53,7 @@ Clean-room / 来源声明（写进 README）：
 
 | 包 | 锁定版本 | 备注 |
 |---|---|---|
-| `SkiaSharp`（当前） | **4.155.0** | 最新稳定；4.156–4.158 只有 preview/rc。`SKBitmap.Resize` / `SKSamplingOptions` / `SKFont` 的具体签名在 M3 核对 |
-| `SkiaSharp`（3.x） | **3.119.1** | 3.x 最后一版稳定；显式要求支持，用 `VersionOverride` 装进 `ImageFacade.SkiaSharp3` |
+| `SkiaSharp`（编译目标） | **3.119.1** | 3.x 最后一版稳定。**刻意选最低支持版本**：4.x 保留了 3.x 的旧成员（`SKPath` 写 API、4 参 `DrawBitmap` 仅标记过时，未删除），所以按 3.x 编译的包在解析到 4.x 的项目里照常运行；反过来会 `MissingMethodException`。4.155.0 已实测兼容（§Z） |
 | `OpenCvSharp4` | **4.13.0.20261107** | 当前；另需按 RID 引 `OpenCvSharp4.runtime.win`（v1 只验 win-x64） |
 | `OpenCvSharp5` | **5.0.0.20261109** | 已发正式版（2026-07 起）；配套 `OpenCvSharp5.runtime.win` 同日期版本。OpenCV 5 的枚举/常量有变动，M6 核对 |
 | `SixLabors.ImageSharp`（当前） | **3.1.12** | 核心最新是 4.1.3，但 `ImageSharp.Drawing` 最新只到 3.1.3（2026-10-09），两者大概率不配套；**锁 3.1.x** |
@@ -62,7 +61,7 @@ Clean-room / 来源声明（写进 README）：
 | `SixLabors.ImageSharp`（2.x） | **2.1.13** | 显式要求支持 2.x；2.x 的核心库仍是 Six Labors Split License |
 | `SixLabors.ImageSharp.Drawing`（2.x） | **1.0.0** | 1.x 分支唯一 GA；2.x 的文字是 `ctx.DrawText(TextGraphicsOptions, ...)`，与 3.x 不同 |
 | `SixLabors.Fonts` | 由 Drawing 传递 | 2.x/3.x 各自解析，不要手写 |
-| `Sdcb.SimdCodecs` | **2.0.0**（只有 `net10.0` 资产） | 只被 `ImageFacade.SdcbSimdCodecs` 引用（因此该工程单目标 net10.0）。**0.2 实测：2.0 拆成 `Sdcb.SimdCodecs.Abstractions` + 按格式的 codec 包**（`PngImageDecoder`/`JpegImageDecoder` 各自有 `Registration`）+ `CodecRegistry.Register(...)` 注册模型——plan 里"`ImageDecoder.Open` + `SimdCodecs.Encode` 一把梭"的说法已过时；软后端编解码按新模型接入（见 §Z） |
+| `Sdcb.SimdCodecs` | **2.0.0**（只有 `net10.0` 资产） | 只被 `ImageFacade.SdcbSimdCodecs` 引用（因此该工程单目标 net10.0）。**0.2 实测：2.0 拆成 `Sdcb.SimdCodecs.Abstractions` + 按格式的 codec 包**（`PngImageDecoder`/`JpegImageDecoder` 各自有 `Registration`）+ `CodecRegistry.Register(...)` 注册模型——plan 里"`ImageDecoder.Open` + `SimdCodecs.Encode` 一把梭"的说法已过时；软后端编解码按新模型接入（见 §Z）。**2026-11 调整**：`ImageBackendBase` 只引用 `Abstractions`，具体格式包（`Png`/`Jpeg`/`Bmp`）只在 `SoftwareCodecs` 里出现并调用 `RegisterCodec`；加格式不用改基类 |
 | ImgProcSharp 源码 | **0.1.0 快照** | 只复制 Core（渲染），不含 SimdCodecs 门面；见 §Y |
 
 CPM（`Directory.Packages.props`）统一管理"当前版本"；旧/新主版本的适配工程用 `VersionOverride`（或单独关闭 CPM），因为 CPM 不允许同一个包出现两个中央版本。版本升级必须重跑一致性套件——像素结果变了要更新基线，而不是"测试太严"。
@@ -134,10 +133,10 @@ CPM（`Directory.Packages.props`）统一管理"当前版本"；旧/新主版本
 
 | 门面 | Skia | ImageSharp | OpenCV | Software |
 |---|---|---|---|---|
-| `Load` | `SKCodec.Create(SKData)` → `GetPixels` | `Image.Load<Rgba32>` | `Cv2.ImDecode` | `ImageDecoder.Open(data)` → `GetFrame(0).CopyPixels(null, PixelFormat.Rgba32, …)` |
+| `Load` | `SKCodec.Create(SKData)` → `GetPixels` | `Image.Load<Rgba32>` | `Cv2.ImDecode` | 注册的 `ImageDecoderRegistration`（`TryReadInfo` + `TryDecodeInto`） |
 | 格式识别 | `SKCodec.EncodedFormat` | `Image.DetectFormat` | `Cv2.ImDecode` 自带 | `ImageDecoder.Format` / `SimdCodecs.DetectFormat` |
 | 方向 | `SKCodec.EncodedOrigin` | `Mutate(x => x.AutoOrient())` | `SimdCodecs.TryReadInfo` + `Cv2.Rotate/Flip` | `frame.Info.Orientation`，由 `ImageBackendBase` 统一转 |
-| 保存 | `SKImage.Encode(format, quality)` | `Save(stream, encoder)` | `Cv2.ImEncode(ext, mat, out bytes)` | `SimdCodecs.Encode(pixels, w, h, PixelFormat.Rgba32, format, stride, options)` |
+| 保存 | `SKImage.Encode(format, quality)` | `Save(stream, encoder)` | `Cv2.ImEncode(ext, mat, out bytes)` | 注册的 `ImageEncoderRegistration`（会话式 `AddFrame` / `WriteRows` / `Commit`） |
 | PNG 级别 | `SKPngEncoderOptions` | `PngEncoder.CompressionLevel` | `ImwriteFlags.PngCompression` | `PngWriteOptions` |
 | JPEG 质量 | `SKImage.Encode(..., quality)` | `JpegEncoder.Quality` | `ImwriteFlags.JpegQuality` | `JpegEncodeOptions` |
 
@@ -154,7 +153,7 @@ CPM（`Directory.Packages.props`）统一管理"当前版本"；旧/新主版本
 | `MitchellNetravali` | `SKCubicResampler.Mitchell` | `MitchellNetravali` | `Cubic`（近似） | `MitchellNetravali` |
 | `CatmullRom` | `SKCubicResampler.CatmullRom` | `CatmullRom` | `Cubic`（近似） | `CatmullRom` |
 
-`ResizeOptions.PreferExactSampler = true` 时，标"近似"的行改走软后端。Skia 的 `SKSamplingOptions` 具体构造在 4.155 上以实际 API 为准。
+标"近似"的采样核只承诺几何一致，不承诺逐像素一致；`PreferExactSampler` 开关已随跨后端回退一并删除。Skia 的 `SKSamplingOptions` 具体构造以 3.119.1 为准（4.x 一致）。
 
 ### F.3 绘制
 
@@ -208,14 +207,14 @@ CPM（`Directory.Packages.props`）统一管理"当前版本"；旧/新主版本
 ## H. Skia 的坑
 
 1. **默认预乘**：`SKBitmap.Decode` 给的是预乘；要么全程预乘、只在边界转，要么创建 `Unpremul` 位图（绘制可能变慢）。本库选前者。
-2. **4.x API 变动**：`SKBitmap.Resize`、`SKSamplingOptions`、`SKCubicResampler`、`SKFont.MeasureText` 的签名在 4.155 上要逐一核对；`SKPaint` 的文字属性在 3.x 已迁到 `SKFont`，4.x 不要再用旧写法。
+2. **以 3.119.1 为编译目标**：`SKBitmap.Resize`、`SKSamplingOptions`、`SKCubicResampler`、`SKFont.MeasureText` 在 3.119 与 4.155 上签名一致（M3 核对过）。`SKPaint` 的文字属性早在 3.x 就迁到了 `SKFont`，两代都用新写法。4.x 只是额外把 `SKPath.MoveTo/LineTo/Close` 和 4 参 `DrawBitmap` 标记为过时，所以**不要用 4.x 新增的 `SKPathBuilder` 和 5 参 `DrawBitmap`**——那会把包的运行下限抬到 4.x。
 3. **字体**：`SKTypeface.FromFamilyName` 在 Linux 容器里常常找不到字体；`SKFontManager.Default.MatchCharacter` 可以按字符兜底，但 v1 只做"整段回退到内置字体"。
 4. **ascent 是负数**：`SKFontMetrics.Ascent` 为负，`TopLeft → baseline` 时取 `-Ascent`。
 5. **JPEG 无 alpha**：`SKImage.Encode(Jpeg)` 会把透明区域画成黑色（或未定义）。门面统一先合成背景色（§3.6）。
 6. **Linux native assets**：需要 `SkiaSharp.NativeAssets.Linux`（依赖 fontconfig）或 `.NoDependencies`；后者没有字体管理器，必须用内置字体。
 7. **SKCanvas 状态**：每个绘制方法内部 `Save/Restore`，不要依赖调用顺序；`SKPaint` 用完即弃（4.x 里 `SKPaint` 是轻量对象，但别跨线程共享）。
 8. **`SKCodec` 缩放解码**：`GetScaledDimensions` 可以省内存，但方向与 ICC 逻辑要一起处理；v1 先全尺寸解码再 Resize。
-9. **3.x 与 4.x 的差异**：4.x 移除/改名的旧 API 集中在 `SKFilterQuality`、部分 `SKPaint` 文字属性、`SKBitmap.Resize` 重载；共享源码用 `#if SKIA3` 包住差异，`SKFont`/`SKSamplingOptions`/`SKCodec` 这套新 API 两边都保留。升级 3.119.1 时先按 4.x 写，再倒推 shim。
+9. **3.x 与 4.x 的差异（已合并为单版本）**：实际差异只有两处 API 形状——`SKPathBuilder`（4.x 新增，`SKPath.MoveTo/LineTo/Close` 被标记过时）与 `SKCanvas.DrawBitmap(bitmap, x, y, SKSamplingOptions, paint)`（4.x 新重载替换 4 参版本）；`SKFont`/`SKSamplingOptions`/`SKCodec`/`SKTypeface.FromData`/`SKImage.Encode` 两代一致。因此删掉 `ImageFacade.SkiaSharp3`，只维护 4.x。要回退到 3.119 时改这两处即可（见 plan §6.2）。
 
 ---
 
@@ -329,8 +328,7 @@ CPM（`Directory.Packages.props`）统一管理"当前版本"；旧/新主版本
 ```
 tests/Conformance.Shared/ConformanceTests.cs      # 用例源码
 tests/ImageFacade.Conformance.Software.Tests/     # ImageFacade.SdcbSimdCodecs
-tests/ImageFacade.Conformance.Skia4.Tests/        # SkiaSharp 4
-tests/ImageFacade.Conformance.Skia3.Tests/        # SkiaSharp 3
+tests/ImageFacade.Conformance.Skia4.Tests/        # SkiaSharp 4（唯一 Skia 版本）
 tests/ImageFacade.Conformance.OpenCv4.Tests/      # OpenCvSharp4
 tests/ImageFacade.Conformance.OpenCv5.Tests/      # OpenCvSharp5
 tests/ImageFacade.Conformance.ImageSharp3.Tests/  # ImageSharp 3
@@ -342,16 +340,16 @@ tests/ImageFacade.Conformance.ImageSharp2.Tests/  # ImageSharp 2
 ```csharp
 public static IEnumerable<object[]> Backends => new[]
 {
-    new object[] { new BackendCase("skia4", () => new SkiaBackend()) },
+    new object[] { new BackendCase("skia", () => new SkiaBackend()) },
 };
 
 // 原生库缺失时跳过，而不是让整个测试套红
 // xUnit v3 用 Assert.Skip；旧版用 SkippableFact 或自定义 SkipException
 ```
 
-- 金标目录按 `{backend-major}` 分（如 `golden/skia4/...`、`golden/skia3/...`），两个主版本的 AA/采样差异不强行对齐。
-- CI 在 **win-x64** 上跑全部七个测试工程；Linux/macOS 只编译核心与两个 ImageSharp 测试工程（不跑），避免 v1 被原生依赖拖住。
-- `PublicAPI.Shipped.txt` 每个适配包各一份，内容必须与核心版本一致（只允许 `InternalsVisibleTo` 不同）。
+- 金标目录按 `{backend-major}` 分（如 `golden/skia/...`、`golden/opencv4/...`），不同主版本的 AA/采样差异不强行对齐。
+- CI 在 **win-x64** 上跑全部六个测试工程；Linux/macOS 只编译核心与两个 ImageSharp 测试工程（不跑），避免 v1 被原生依赖拖住。
+- `PublicAPI.Shipped.txt` 每个适配工程各一份，内容必须与核心版本一致（只允许 `InternalsVisibleTo` 不同）。
 
 ### L.3 容差
 
@@ -390,7 +388,7 @@ public static IEnumerable<object[]> Backends => new[]
 |---|---|---|---|
 | `ImageFacade` 核心 | ✔ | ✔ | 纯托管、无编解码依赖；字体是嵌入资源 |
 | `ImageFacade.SdcbSimdCodecs` | ✔ | ✔ | 复制源码 + Sdcb 2.0 都是纯托管；AOT 冒烟主要压这个包 |
-| Skia 3/4 | ✔ | ✔ | 需要 native assets；Linux 上注意 fontconfig 依赖 |
+| Skia 4 | ✔ | ✔ | 需要 native assets；Linux 上注意 fontconfig 依赖 |
 | ImageSharp | △ | △ | 反射式解码器注册与字体集合需要配置；后端工程不要开 `IsAotCompatible` |
 | OpenCV | ✖ | ✖ | P/Invoke + 动态加载 + 大 native 库；不承诺 AOT |
 
@@ -427,7 +425,7 @@ Blazor WebAssembly：Skia（WASM native）/ ImageSharp / Software 可用；OpenC
 ## O. 未决问题
 
 1. ~~**ImageSharp 3.x 配对**~~（M0 已定论）：Drawing 3.1.3 依赖 `ImageSharp >= 4.1.3`，所以 3.x 档必须锁 **3.1.12 + Drawing 2.1.3**；2.x 用 `2.1.13 + Drawing 1.0.0`。若要覆盖 ImageSharp 4，另加 `ImageSharp4` 适配包（Drawing 3.x）。
-2. **SkiaSharp 4.155 的 API**：`SKBitmap.Resize` 是否还在？`SKSamplingOptions` 的构造与 `SKCubicResampler` 是否改名？M3 同时用 3.119.1 编译一遍，把差异收敛进 `ApiCompat.Skia3.cs`。
+2. ~~**SkiaSharp 4.155 的 API**~~（M3 已定论）：`SKBitmap.Resize` 仍在，`SKSamplingOptions` / `SKCubicResampler` 未改名。3.119 与 4.155 的差异只有 `SKPathBuilder` 与 `DrawBitmap` 重载两处，且 4.x 保留旧成员，因此**只维护一个包、编译目标 3.119.1**，同时服务 3.x 与 4.x 调用方（§H.9、§Z）。
 3. **OpenCvSharp5 的 API 差异**：`ImreadModes`/`InterpolationFlags`/`ImwriteFlags` 常量是否改名、`ImEncode` 支持格式、`Mat` 构造/`Step` 是否一致；M6 用 5.0.0.20261109 实测。
 4. **OpenCV 的 EXIF 行为**：`imdecode` 是否默认转正；用带 Orientation=6 的 JPEG 实测，结论写进 §G。
 5. **OpenCV 4 通道 AA**：`LineTypes.AntiAlias` 在 `CV_8UC4` 上是否与 3 通道一致（是否会把 alpha 也模糊）。
@@ -477,9 +475,9 @@ Blazor WebAssembly：Skia（WASM native）/ ImageSharp / Software 可用；OpenC
   - 删除 csproj 打包属性、`InternalsVisibleTo`、自带的字体资源；
   - `EmbeddedFonts` 改为读取核心公开的 `BuiltInFont.Data`，`TextFont.BuiltIn` 不再使用；
   - `TextPainter.cs`（自带 RGB24/BGRA 混合）不复制，文字混合统一走 `DrawingContext.BlendCoverage`。
-- 依赖与版本：复制进来的 ImgProcSharp Core 本身**不接触 Sdcb**；`ImageBackendBase` 按 `Sdcb.SimdCodecs 2.0` 编写（`ImageDecoder` / `SimdCodecs.Encode` / `PixelFormat` 结构体），Sdcb 再升级只改这一个文件。
+- 依赖与版本：复制进来的 ImgProcSharp Core 本身**不接触 Sdcb**；`ImageBackendBase` 只引用 `Sdcb.SimdCodecs.Abstractions`（`ImageDecoderRegistration` / `ImageEncoderRegistration`），具体格式包集中在 `SoftwareCodecs` 注册；Sdcb 再升级只改这两个文件。
 - 能力对应：
-  - ImgProcSharp 没有 Save → 编码由 `ImageBackendBase` 用 `SimdCodecs.Encode`（2.0，多格式）。
+  - ImgProcSharp 没有 Save → 编码由 `ImageBackendBase` 走 `ImageEncoderRegistration` 的会话式 API（2.0，格式由注册决定）。
   - `Canvas` 是**预乘** → 边界转换由 `SoftwareBackend` 负责。
   - 文字是**基线**锚点 → 门面负责 `TopLeft → baseline` 换算。
   - 软后端覆盖 v1 全部绘制能力（含虚线、miter/bevel/round、裁剪变换的底层实现）。
@@ -752,62 +750,66 @@ using (var fb = writeableBitmap.Lock())
 
 ---
 
-## X. 多主版本适配（3/4、4/5、2/3）
+## X. 多主版本适配（OpenCvSharp 4/5、ImageSharp 2/3）
 
-### X.1 为什么不能一个包通吃
+### X.1 为什么不能一个工程通吃
 
-- CLR 的程序集引用是**按版本绑定**的：一个 `ImageFacade.SkiaSharp.dll` 只能引用一个 `SkiaSharp` 主版本。绑定重定向在 .NET Core 默认不启用、跨平台也不可靠，而且解决不了 `SKBitmap.Resize` 这类 API 变更。
-- `extern alias` 只能在一个工程里同时引用两个版本（且要求强名称/不同别名），发布出去的包无法替消费者决定用哪个。
-- 结论：**主版本 = 包边界**。共享源码把重复降到只差 shim。
+- CLR 的程序集引用是**按版本绑定**的：一个 `ImageFacade.ImageSharp.dll` 只能引用一个 `ImageSharp` 主版本。绑定重定向在 .NET Core 默认不启用、跨平台也不可靠，而且解决不了 `ExifProfile.GetValue` 这类 API 变更。
+- `extern alias` 只能在一个工程里同时引用两个版本（且要求强名称/不同别名），库也无法替消费者决定用哪个。
+- 结论：**主版本 = 工程边界**。共享源码把重复降到只差 shim。
+- **例外是 SkiaSharp**：3.119 与 4.155 只差两处 API 形状、语义完全一致，且 4.x 保留旧成员，因此只保留 `ImageFacade.SkiaSharp` 一个工程，**编译目标 3.119.1**，一个包同时服务 3.x 与 4.x（§H.9）。
 
 ### X.2 共享源码的编译方式
 
 ```xml
-<!-- src/ImageFacade.SkiaSharp/ImageFacade.SkiaSharp.csproj（当前版：源码就在这里，默认 glob 收进来） -->
+<!-- src/ImageFacade.ImageSharp/ImageFacade.ImageSharp.csproj（当前版：源码就在这里，默认 glob 收进来） -->
 <PropertyGroup>
-  <DefineConstants>$(DefineConstants);SKIA4</DefineConstants>
+  <DefineConstants>$(DefineConstants);IMAGESHARP3</DefineConstants>
 </PropertyGroup>
 <ItemGroup>
-  <PackageReference Include="SkiaSharp" />                     <!-- 版本在 Directory.Packages.props -->
+  <PackageReference Include="SixLabors.ImageSharp" />          <!-- 版本在 Directory.Packages.props -->
+  <PackageReference Include="SixLabors.ImageSharp.Drawing" />
 </ItemGroup>
 ```
 
 ```xml
-<!-- src/ImageFacade.SkiaSharp3/ImageFacade.SkiaSharp3.csproj（3.x：链接上面那份源码） -->
+<!-- src/ImageFacade.ImageSharp2/ImageFacade.ImageSharp2.csproj（2.x：链接上面那份源码） -->
 <PropertyGroup>
-  <DefineConstants>$(DefineConstants);SKIA3</DefineConstants>
+  <DefineConstants>$(DefineConstants);IMAGESHARP2</DefineConstants>
 </PropertyGroup>
 <ItemGroup>
-  <PackageReference Include="SkiaSharp" VersionOverride="3.119.1" />
+  <PackageReference Include="SixLabors.ImageSharp" VersionOverride="2.1.13" />
+  <PackageReference Include="SixLabors.ImageSharp.Drawing" VersionOverride="1.0.0" />
 </ItemGroup>
 <ItemGroup>
-  <Compile Include="..\ImageFacade.SkiaSharp\**\*.cs"
-           Exclude="..\ImageFacade.SkiaSharp\bin\**;..\ImageFacade.SkiaSharp\obj\**"
+  <Compile Include="..\ImageFacade.ImageSharp\**\*.cs"
+           Exclude="..\ImageFacade.ImageSharp\bin\**;..\ImageFacade.ImageSharp\obj\**"
            Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
 </ItemGroup>
 ```
+
+OpenCvSharp 4/5 更简单：两代 API 完全一致，`ImageFacade.OpenCvSharp5` 只做 `VersionOverride` + 源码链接，**连 `DefineConstants` 都不需要**（plan §6.4）。
 
 - 源码只有一份，放在**当前主版本**的适配工程目录里（不另设 `src/adapters/`）；老/新主版本链接编译。唯一单独放的是 `ImageFacade.SdcbSimdCodecs/Rendering/`（复制改造的 ImgProcSharp Core，它不是适配层）。
 - 链接时必须 `Exclude` 对方的 `bin`/`obj`，否则生成的 `AssemblyInfo`/`GlobalUsings` 会被编两遍。
 - 另一个适配工程**不要** `ProjectReference`——那样就变成引用 dll，类型会在两个程序集里各有一份。
 - `VersionOverride` 是 CPM 下唯一干净的"同包不同版本"写法；若嫌它隐晦，给旧版本工程单独设 `ManagePackageVersionsCentrally=false`。
-- 定义符号统一：`SKIA3` / `SKIA4`、`OPENCV4` / `OPENCV5`、`IMAGESHARP2` / `IMAGESHARP3`。
+- 定义符号统一：`IMAGESHARP2` / `IMAGESHARP3`（OpenCvSharp 4/5 无需符号；SkiaSharp 单版本无符号）。
 
 ### X.3 差异收敛
 
-- 允许的差异只在 `ApiCompat.Skia3.cs` / `ApiCompat.OpenCv5.cs` 这类 partial 文件里，且尽量小（枚举常量、单个重载）。
+- 允许的差异只在 `ApiCompat.OpenCv5.cs` / `ApiCompat.ImageSharp2.cs` 这类 partial 文件里，且尽量小（枚举常量、单个重载）。
 - ImageSharp 2/3 实际只差 EXIF 读取（`#if IMAGESHARP2`），一个文件即可；将来真出现大差异再按 `TextDrawing.Legacy.cs` 这样的 partial 文件分叉。
-- 每个适配包都跑一遍 `PublicAPI` 比对：公开 API 必须完全一致，否则"换库不改代码"不成立。
+- 每个适配工程都跑一遍 `PublicAPI` 比对：公开 API 必须完全一致，否则"换库不改代码"不成立。
 - 每升级一个三方主版本：先加测试工程 → 编译报错 → 收敛 shim → 跑一致性 → 更新 README 对照表。
 
-### X.4 包 ↔ 版本对照
+### X.4 工程 ↔ 版本对照
 
-| 包 | 三方库 | 备注 |
+| 工程 | 三方库 | 备注 |
 |---|---|---|
 | `ImageFacade` | 无 | 核心：契约 + 默认实现 + 字体 |
 | `ImageFacade.SdcbSimdCodecs` | Sdcb.SimdCodecs 2.0.0 | 软后端：ImgProcSharp Core 源码 + 编解码 |
-| `ImageFacade.SkiaSharp` | SkiaSharp 4.155.0 | 当前 |
-| `ImageFacade.SkiaSharp3` | SkiaSharp 3.119.1 | 兼容旧项目 |
+| `ImageFacade.SkiaSharp` | SkiaSharp 3.119.1（编译目标） | 一个包覆盖 3.x 与 4.x（4.x 版本提升即可） |
 | `ImageFacade.OpenCvSharp` | OpenCvSharp4 4.13.0 + runtime.win | 当前 |
 | `ImageFacade.OpenCvSharp5` | OpenCvSharp5 5.0.0 + runtime.win | 新主版本 |
 | `ImageFacade.ImageSharp` | ImageSharp 3.1.12 + Drawing 2.1.3 | 当前 |
@@ -817,7 +819,7 @@ using (var fb = writeableBitmap.Lock())
 
 - 一个版本一个测试工程（见 §L.2），共享测试源码；`dotnet test` 在 solution 级别全部跑。
 - v1 只要求 **win-x64**；OpenCvSharp4/5 的 native DLL 在各自输出目录，互不干扰。
-- `dotnet pack` 时检查每个适配包只依赖自己的三方库版本，避免 `ImageFacade.SkiaSharp3` 被 `SkiaSharp 4` 污染。
+- `dotnet pack` 时检查每个适配包只依赖自己的三方库版本，避免 `ImageFacade.ImageSharp2` 被 ImageSharp 3 污染（CPM 的单版本约束见 §X.2）。
 
 ---
 
@@ -895,9 +897,10 @@ Fonts/             （不复制字体，改用核心的 WenQuanYiMicroHei.ttf.gz
 | 渲染源码复制 | ImgProcSharp **0.2** Core 的 47 个 `.cs` → `src/ImageFacade.SdcbSimdCodecs/Rendering/`；命名空间改 `ImageFacade.SdcbSimdCodecs.Rendering[.Text]`，**所有类型 internal**（残留 public 类型 0 处） | plan §Y.2；公开 API 不泄漏实现 |
 | 内置字体 | 删除上游 `Fonts/` 与资源名；字体引擎上移核心后统一用 `ImageFacade.Font.BuiltIn`（首次访问解压 + 解析一次）与 `BuiltInFont.Data` | 全解决方案只有一份字体字节、一份解析实现 |
 | 系统字体 | 复制层没有系统字体管理器：软后端遇到 `FontRef.Family(...)` 统一退回内置字体 | 宁可画出来，也不要抛异常 |
-| 软后端编解码 | `ImageBackendBase` 已接 Sdcb 2.0：**解码** = `ImageDecoderRegistration.TryReadInfo` + `TryDecodeInto(Rgba32)`；**编码** = `PngWriter.Encode` / `JpegEncoder.Encode` / `BmpEncoder.Encode`（都是直通 RGBA8，正好是我们的规范格式）。支持 PNG/JPEG/BMP，`Decode` 顺带做 EXIF 1..8 转正 | 2.0 没有统一的 `SimdCodecs.Encode`，编码是按格式包的 writer；加格式 = 加包 + 加一个 `switch` 分支 |
+| 软后端编解码 | `ImageBackendBase` 只依赖 Abstractions 的注册模型：**解码** = 注册的 `ImageDecoderRegistration.TryReadInfo` + `TryDecodeInto(Rgba32)`；**编码** = 注册的 `ImageEncoderRegistration.Create(ArrayBufferWriter)` → `AddFrame` → `WriteRows` → `Commit`。`SoftwareCodecs` 的 `[ModuleInitializer]` 注册 PNG/JPEG/BMP（JPEG 质量经 `JpegEncodeOptions` 传入），`Decode` 顺带做 EXIF 1..8 转正 | 基类不认识任何具体格式：加格式 = 加包 + 调用一次 `RegisterCodec`，不用改 `switch`；PNG 没有 `EncodeOptions` 派生类型，压缩级别用默认值 |
 | M8 底色合成 | 编码前若 `!format.SupportsAlpha()`（JPEG/BMP）且存在透明像素，就在门面把直通像素按 `SaveOptions.BackgroundColor` 合成成不透明临时帧再编码；全不透明时**不复制**（用假后端断言 `Create` 次数不变） | 透明处不能变黑；合成属于"语义"而非"渲染"，放门面层各后端一致；PNG/WebP/TIFF/GIF 仍保留 alpha |
-| M3 Skia 后端 | `SkiaBackend`：帧 = `SKBitmap(Rgba8888, Premul)` + 常驻 `SKCanvas`；解码 PNG/JPEG/BMP/GIF/WebP/ICO，编码 PNG/JPEG/WebP；EXIF 转正复用核心 `PixelTransforms` | 一份源码两个包：`#if SKIA4` 用 `SKPathBuilder` 与 `DrawBitmap(..., SKSamplingOptions, paint)`；`#if SKIA3` 用 `SKPath` 与 4 参 `DrawBitmap`（4.155 把 `SKPath` 写 API 和 4 参 `DrawBitmap` 标记过时，项目开了 TreatWarningsAsErrors，必须切新 API） |
+| M3 Skia 后端 | `SkiaBackend`：帧 = `SKBitmap(Rgba8888, Premul)` + 常驻 `SKCanvas`；解码 PNG/JPEG/BMP/GIF/WebP/ICO，编码 PNG/JPEG/WebP；EXIF 转正复用核心 `PixelTransforms` | 单工程绑 SkiaSharp **3.119.1**：用 `SKPath` 写路径与 4 参 `DrawBitmap`（3.x 标准写法）。4.x 只是把这两者标记过时、没有删除，所以按 3.x 编译的包在 4.x 项目里照常运行 |
+| SkiaSharp 单包策略 | 删除 `src/ImageFacade.SkiaSharp3`（该工程只有 csproj，源码 100% 链接自 `ImageFacade.SkiaSharp`）；`SkiaBackend` 去掉两处 `#if SKIA4/#else`、csproj 去掉 `DefineConstants`、slnx 去掉该工程。随后把编译目标从 4.155.0 **降到 3.119.1**（`Directory.Packages.props` 里 `SkiaSharp` 与 `SkiaSharp.NativeAssets.Win32` 同步），代码改回 `SKPath` + 4 参 `DrawBitmap` | 3.119 与 4.155 的能力/语义一致，仅两处 API 形状不同，且 4.x 保留旧成员 → **用最低支持版本编译，一个包同时服务 3.x 与 4.x**。实测：库编译于 3.119.1，调用方显式引用 `SkiaSharp 4.155.0` + `NativeAssets.Win32 4.155.0`，运行时加载 4.155.0.0，绘制/文字/像素回读全部正常。`dotnet build` 0 警告、`dotnet test` 158 项全绿 |
 | Skia 原生资产 | 适配包**不引** `SkiaSharp.NativeAssets.*`，由应用/示例/测试按 RID 引 | 不把 win-x64 二进制钉进库；同一份源码要能跑 Linux/ARM |
 | EXIF 转正 | 逻辑提到核心 `PixelTransforms.ApplyOrientation`（直通 RGBA 进/出），软后端与 Skia 共用 | 避免两套实现走偏；Skia 解码后先导直通再转正（一次额外拷贝，只在有方向信息时发生） |
 | 跨后端一致性 | 示例同一份代码跑 software / skia：`MeasureText` 完全一致（720×42.205），墨迹像素 44,386 vs 44,269（AA 差异 0.26%） | 语义对齐达标（plan §9 要求包围盒 ≤ 1 px） |
@@ -911,5 +914,9 @@ Fonts/             （不复制字体，改用核心的 WenQuanYiMicroHei.ttf.gz
 | 字体引擎上移核心 | `TrueTypeFont*`/`GlyphOutline`/`GlyphRasterizer`/`GlyphMask`/`GlyphPath`/`PathCollection`/`TextLayout` 移到 `src/ImageFacade/Text/Engine/`（命名空间 `ImageFacade.Text.Engine`），`TextFont`→公共 `ImageFacade.Font`（`Font.cs` + `Font.Layout.cs`）；`EmbeddedFonts`、`TextAlign` 删除（后者复用核心同名枚举） | 核心 `InternalsVisibleTo` 给 `ImageFacade.SdcbSimdCodecs` 与 `ImageFacade.OpenCvSharp5`；核心因此多目标 net8.0/net10.0 都带字体能力 |
 | 字体复用 | `Font.BuiltIn` 是全局单例（首次解压+解析一次）；`Font.Load/LoadFromFile/LoadFromStream` 各解析一次后一直复用；`TextStyle.FontFace` 非空时后端直接用它，不再走 `FontRef` 解析（字形位图按 码点×字号 缓存，上限 4096） | 不传 `FontFace` 时行为不变：`FontRef` → 内置字体；原生文字后端（Skia/ImageSharp）忽略 `FontFace` |
 | 取消跨后端回退 | 删除 `SoftwareFallback`、`ImageEngineOptions`（含 `FallbackMode` / `FallbackBackend` / `OnFallback` / `Strict` / `PreferSoftwareRendering` / `AdaptiveThreshold`）、`FallbackEvent`、`FacadeImage.UseSoftware`/`UseNative`/`IsSoftwareSurface`/`FallbackCount`，以及只为合并回退而存在的 `Mutate`/`BeginDraw`/`DrawBatch`；`ImageEngine` 变成单参数构造 | 其他适配包一律不引用 `ImageFacade.SdcbSimdCodecs`；`Try*` 返回 `false` 直接抛 `FeatureNotSupportedException(feature, backendName)`，没有第二档 |
+| ImageSharp 风格语法糖 | `FacadeImage.Mutate(Action<FacadeImage>)` 与 `Clone(Action<FacadeImage>)` 重新加回，但实现只是"调用回调 / 复制后调用回调"——没有 `IImageProcessingContext`、没有 `DrawBatch`、没有后端状态 | 与 ImageSharp 的 `Mutate` 形状一致但语义更简单：`FacadeImage` 本来就原地改，不存在"攒操作避免副本"的需求；ImageSharp 后端仍在自己 `Try*` 里用 `Image.Mutate(...)` |
 | 后端隔离 | 软后端仍保留核心的 `InternalsVisibleTo`（用 `Font.Layout`/`GlyphMask`），但不再是任何后端的兜底；测试拆出 `tests/ImageFacade.SdcbSimdCodecs.Tests`，其余测试项目移除对软后端的引用 | 用 `dotnet list reference` 可验证：除该测试项目外没有工程引用软后端；示例仍演示 `new ImageEngine(new SoftwareBackend())` 的独立用法 |
 | OpenCV 4 文字 | 删除 `OPENCV4`/`OPENCV5` 条件编译与对应 `DefineConstants`：4/5 都走核心 `Font.Layout` + A8 覆盖率混色，中文/半透明文字原生可画 | 两份源码完全一致，`Capabilities` 也一致（都有 `DrawTextUnicode`）；半透明形状/虚线仍抛错 |
+| 批量释放工具 | 核心新增 `DisposableCollection`：`items.DisposeAll()`（数组重载 + `IEnumerable` 重载）与 `Adopt(items)` 作用域；`null` 跳过、单个失败不打断其余、单异常保栈 / 多异常 `AggregateException`、作用域 `Dispose` 幂等 | 替换 `foreach (CvMat plane in planes) plane.Dispose();` 这类写法；OpenCV 的 `MergeGrayAlpha` 已改用 |
+| 打包发布策略纠正 | `Directory.Build.props` 去掉全局 `IsPackable=false`；改为 `src` 的 7 个工程打包发布（同版本 `0.1.0`），`tests`/`samples` 各自保留 `IsPackable=false`。公共元数据（`Authors` / `PackageLicenseExpression=Apache-2.0` / `PackageTags` / `PackageReadmeFile` / `IncludeSymbols` + `snupkg`）与 `README.md`、`THIRD-PARTY-NOTICES.txt`、`licenses/` 的注入统一放 `Directory.Build.props`，各包只提供自己的 `Description` | 早期注释把"第三方库不打包"（§B）误写成"本仓库只作为源码载体、不打包不发布"，导致全局 `IsPackable=false`。实际需求是**本库自身要发布 NuGet**，只是不打包第三方二进制/源码。验证：`dotnet pack -c Release` 产出 7 个 `.nupkg` + 7 个 `.snupkg`，适配包依赖版本与 `Directory.Packages.props` 一致 |
+| Pipeline 归属 | `ImageFacade.Pipeline`（letterbox / `Tensorizer` / `Nms` / `Detection` / `DetectionDrawing`）放在**核心工程** `src/ImageFacade/Pipeline/`，随 `ImageFacade` 包发布 | **不单独成包**：它只依赖门面公开 API 与 BCL，不需要编解码也不需要后端；拆包只会让用户多引一个包、多管一个版本 |

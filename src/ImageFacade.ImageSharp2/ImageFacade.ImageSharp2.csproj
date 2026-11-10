@@ -4,6 +4,7 @@
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade.ImageSharp2</AssemblyName>
     <RootNamespace>ImageFacade.ImageSharp</RootNamespace>
+    <Description>ImageFacade 的 ImageSharp 2.x 后端：纯托管、格式全，适合服务端批处理。使用方需自行确认 Six Labors Split License。</Description>
     <DefineConstants>$(DefineConstants);IMAGESHARP2</DefineConstants>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <IsAotCompatible>false</IsAotCompatible>

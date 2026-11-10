@@ -4,6 +4,7 @@
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade.OpenCvSharp</AssemblyName>
     <RootNamespace>ImageFacade.OpenCvSharp</RootNamespace>
+    <Description>ImageFacade 的 OpenCvSharp4 后端：BGRA Mat 直接进出，原生绘制；半透明形状与虚线不支持，文字用核心字形光栅化（含中文）。</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 

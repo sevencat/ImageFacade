@@ -11,6 +11,46 @@ public sealed class SoftwareBackendTests
         => new(new SoftwareBackend());
 
     [Fact]
+    public void Encode_Unregistered_Format_Throws_Feature_Not_Supported()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(8, 8, Rgba32.White);
+
+        // 软后端自带 PNG/JPEG/BMP；GIF 没注册 → 能力表里没有它
+        Assert.False(engine.CanEncode(ImageFormat.Gif));
+        Assert.False(engine.CanDecode(ImageFormat.Gif));
+
+        FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(
+            () => image.Encode(new SaveOptions { Format = ImageFormat.Gif }));
+        Assert.Equal("Encode", ex.Feature);
+    }
+
+    [Fact]
+    public void Decode_Unregistered_Format_Throws_Feature_Not_Supported()
+    {
+        using var engine = CreateEngine();
+
+        // GIF89a 头：没有任何已注册的解码器认领
+        byte[] gif = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+
+        FeatureNotSupportedException ex = Assert.Throws<FeatureNotSupportedException>(() => engine.Load(gif));
+        Assert.Equal("Decode", ex.Feature);
+    }
+
+    [Fact]
+    public void Registered_Formats_Are_Exposed_From_The_Registry()
+    {
+        using var engine = CreateEngine();
+
+        Assert.True(engine.CanDecode(ImageFormat.Png));
+        Assert.True(engine.CanDecode(ImageFormat.Jpeg));
+        Assert.True(engine.CanDecode(ImageFormat.Bmp));
+        Assert.True(engine.CanEncode(ImageFormat.Png));
+        Assert.True(engine.CanEncode(ImageFormat.Jpeg));
+        Assert.True(engine.CanEncode(ImageFormat.Bmp));
+    }
+
+    [Fact]
     public void Create_And_GetPixel_RoundTrips_Straight_Rgba()
     {
         using var engine = CreateEngine();

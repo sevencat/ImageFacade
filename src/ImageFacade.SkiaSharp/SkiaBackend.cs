@@ -10,8 +10,9 @@ namespace ImageFacade.SkiaSharp;
 /// <remarks>
 /// <para>帧 = <see cref="SKBitmap"/>（<c>Rgba8888 + Premul</c>）+ 常驻 <see cref="SKCanvas"/>。</para>
 /// <para>
-/// 同一份源码被 <c>ImageFacade.SkiaSharp</c>（SKIA4）与 <c>ImageFacade.SkiaSharp3</c>（SKIA3）链接编译，
-/// 版本差异处用 <c>#if SKIA4</c> / <c>#if SKIA3</c> 隔离。
+/// 绑定 SkiaSharp <b>3.119.1</b>，以最低支持版本编译，只用 3.x 就有的 API
+/// （<c>SKPath</c> 的写 API、4 参 <c>DrawBitmap</c>）。4.x 保留了这些成员（仅标记为过时），
+/// 所以使用方把 SkiaSharp 提升到 4.x 时本包照常工作；反过来（用 4.x 编译、在 3.x 上运行）不成立。
 /// </para>
 /// </remarks>
 public sealed class SkiaBackend : IImageBackend
@@ -175,11 +176,7 @@ public sealed class SkiaBackend : IImageBackend
         var target = (SkiaFrame)destination;
         var layer = (SkiaFrame)source;
         using var paint = new SKPaint { IsAntialias = false };
-#if SKIA4
-        target.Canvas.DrawBitmap(layer.Bitmap, offset.X, offset.Y, new SKSamplingOptions(SKFilterMode.Nearest, SKMipmapMode.None), paint);
-#else
         target.Canvas.DrawBitmap(layer.Bitmap, offset.X, offset.Y, paint);
-#endif
         return true;
     }
 
@@ -528,24 +525,12 @@ public sealed class SkiaBackend : IImageBackend
         });
     }
 
-    /// <summary>折线 / 多边形路径。SkiaSharp 4 用 <c>SKPathBuilder</c>（SKPath 的写 API 已过时），3.x 只有 <c>SKPath</c>。</summary>
+    /// <summary>
+    /// 折线 / 多边形路径。用 <c>SKPath</c> 的写 API：3.x 的标准写法；
+    /// 4.x 把它标记为过时但仍可用，因此按 3.x 编译的包在 4.x 上照常运行。
+    /// </summary>
     private static SKPath BuildPath(ReadOnlySpan<PointF> points, bool closed)
     {
-#if SKIA4
-        var builder = new SKPathBuilder();
-        builder.MoveTo(points[0].X, points[0].Y);
-        for (int i = 1; i < points.Length; i++)
-        {
-            builder.LineTo(points[i].X, points[i].Y);
-        }
-
-        if (closed)
-        {
-            builder.Close();
-        }
-
-        return builder.Detach();
-#else
         var path = new SKPath();
         path.MoveTo(points[0].X, points[0].Y);
         for (int i = 1; i < points.Length; i++)
@@ -559,7 +544,6 @@ public sealed class SkiaBackend : IImageBackend
         }
 
         return path;
-#endif
     }
 
     private static SKColor ToColor(Rgba32 color) => new(color.R, color.G, color.B, color.A);

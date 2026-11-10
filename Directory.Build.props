@@ -11,10 +11,25 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <VersionPrefix>0.1.0</VersionPrefix>
 
-    <!-- 本仓库只作为源码载体：任何工程都不打包、不发布到 NuGet（见 misc §Q/§Y）。 -->
-    <IsPackable>false</IsPackable>
+    <!-- 打包策略：本仓库的 src 工程发布到 NuGet（7 个包，同版本号）；
+         tests/samples/benchmarks 各自设 IsPackable=false。
+         第三方库一律 PackageReference，不打包、不转发其二进制或源码（misc §B）。 -->
+    <Authors>ImageFacade contributors</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageTags>image;drawing;canvas;skiasharp;opencv;imagesharp;text;resize;yolo</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
 
     <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
   </PropertyGroup>
+
+  <!-- 每个包都带：README（安装/能力表/许可证提示）、第三方声明、随源码分发的许可证 -->
+  <ItemGroup>
+    <None Include="$(RepoRoot)README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="$(RepoRoot)THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="$(RepoRoot)licenses\*" Pack="true" PackagePath="licenses\" Visible="false" />
+  </ItemGroup>
 
 </Project>
