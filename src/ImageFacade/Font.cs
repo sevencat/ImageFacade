@@ -8,7 +8,8 @@ namespace ImageFacade;
 /// </summary>
 /// <remarks>
 /// <para>
-/// 字形位图按 (码点, 字号) 缓存（上限 <c>CacheLimit</c>，超出整体清空），所以同一字号反复画同一批字只光栅化一次。
+/// 字形位图按 (码点, 字号) 缓存，上限 <c>CacheLimit</c>；满了淘汰**最久未用**的一条（LRU），
+/// 而不是整体清空——多字号混排时整体清空会让刚画过的字形立刻重新光栅化。
 /// </para>
 /// <para>
 /// 通过 <see cref="TextStyle.FontFace"/> 把实例交给后端，托管文字后端（软件后端 / OpenCV 5 适配）直接复用，
@@ -20,8 +21,15 @@ public sealed partial class Font
     private const int CacheLimit = 4096;
 
     private readonly TrueTypeFont _font;
-    private readonly Dictionary<long, GlyphMask> _maskCache = [];
+
+    private readonly Dictionary<long, CacheEntry> _maskCache = [];
+
+    /// <summary>最近使用顺序：头部最新、尾部最旧。</summary>
+    private readonly LinkedList<long> _lru = new();
+
     private readonly object _gate = new();
+
+    private readonly record struct CacheEntry(GlyphMask Mask, LinkedListNode<long> Node);
 
     private Font(TrueTypeFont font)
     {
@@ -66,17 +74,33 @@ public sealed partial class Font
     /// <summary>码点是否有字形。</summary>
     public bool HasGlyph(int codePoint) => _font.HasGlyph(codePoint);
 
+    /// <summary>当前缓存的字形位图条数（诊断用）。</summary>
+    internal int CachedMaskCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _maskCache.Count;
+            }
+        }
+    }
+
     /// <summary>
     /// 取字形覆盖位图。<paramref name="size"/> 是 em 高度（像素），例如 16、24、40。
     /// </summary>
     internal GlyphMask GetGlyphMask(int codePoint, float size)
     {
         var key = ((long)codePoint << 32) | (uint)(int)MathF.Round(size * 4f);
+
         lock (_gate)
         {
-            if (_maskCache.TryGetValue(key, out var cached))
+            if (_maskCache.TryGetValue(key, out CacheEntry cached))
             {
-                return cached;
+                // 命中即提升为最近使用
+                _lru.Remove(cached.Node);
+                _lru.AddFirst(cached.Node);
+                return cached.Mask;
             }
         }
 
@@ -84,12 +108,20 @@ public sealed partial class Font
 
         lock (_gate)
         {
-            if (_maskCache.Count >= CacheLimit)
+            // 光栅化在锁外完成，期间可能已被别的线程插入
+            if (_maskCache.TryGetValue(key, out CacheEntry raced))
             {
-                _maskCache.Clear();
+                return raced.Mask;
             }
 
-            _maskCache[key] = mask;
+            // 超出上限时只淘汰最久未用的一条，不做整体清空
+            while (_maskCache.Count >= CacheLimit && _lru.Last is { } oldest)
+            {
+                _lru.RemoveLast();
+                _maskCache.Remove(oldest.Value);
+            }
+
+            _maskCache[key] = new CacheEntry(mask, _lru.AddFirst(key));
         }
 
         return mask;

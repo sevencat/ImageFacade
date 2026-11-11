@@ -22,8 +22,8 @@ public static class PixelConverter
 
         int sourceBpp = sourceFormat.GetBytesPerPixel();
         int destinationBpp = destinationFormat.GetBytesPerPixel();
-        int sourceRowBytes = width * sourceBpp;
-        int destinationRowBytes = width * destinationBpp;
+        int sourceRowBytes = checked(width * sourceBpp);
+        int destinationRowBytes = checked(width * destinationBpp);
 
         for (int y = 0; y < height; y++)
         {
@@ -188,8 +188,8 @@ public static class PixelConverter
             throw new ArgumentOutOfRangeException(nameof(width), "宽高必须大于 0。");
         }
 
-        int sourceMinStride = width * sourceFormat.GetBytesPerPixel();
-        int destinationMinStride = width * destinationFormat.GetBytesPerPixel();
+        int sourceMinStride = checked(width * sourceFormat.GetBytesPerPixel());
+        int destinationMinStride = checked(width * destinationFormat.GetBytesPerPixel());
 
         if (sourceStride < sourceMinStride)
         {

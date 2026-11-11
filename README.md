@@ -9,7 +9,7 @@
   <a href="https://www.nuget.org/packages/Sevencat.ImageFacade"><img alt="Downloads" src="https://img.shields.io/nuget/dt/Sevencat.ImageFacade"></a>
   <img alt=".NET" src="https://img.shields.io/badge/.NET-net8.0%20%7C%20net10.0-512BD4">
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-236%20passed-brightgreen">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-256%20passed-brightgreen">
   <img alt="Backends" src="https://img.shields.io/badge/backends-4-9cf">
 </p>
 
@@ -422,6 +422,8 @@ OpenCV 解码后会把输入统一成 **8 位 BGRA**：灰度、灰度+alpha、�
 - 核心内置文泉驿微米黑（`FontRef.BuiltIn`），**没有系统字体也能画中文**；容器 / CI / AOT 场景不需要额外准备字体。
 - 系统字体族（`FontRef.Family(...)`）只有 Skia 与 ImageSharp 支持；OpenCV 与软后端没有系统字体管理器，会退回内置字体。
 - 自备字体：`Font.Load*` 拿到实例后塞进 `TextStyle.FontFace`，可跨多次绘制复用。
+- `FontRef.FromData(...)` / `FontRef.FromFile(...)` 在 Skia 后端**按引用缓存**（同一 `FontRef` 只解析一次），
+  且不会长期占用字体文件句柄——注册后文件可以照常替换或删除。
 
 ## 解码尺寸上限（防解压炸弹）
 
@@ -450,8 +452,30 @@ using var big = engine.Load(path, new LoadOptions { MaxPixels = 0 });
 | 参数非法 | `ArgumentException` / `ArgumentOutOfRangeException` |
 | 后端不支持该能力 | `FeatureNotSupportedException`（含后端名、能力名、替代建议） |
 | 图像超过 `LoadOptions.MaxPixels` | `ImageSizeLimitExceededException` |
+| 保存到文件失败 | `ImageSaveFailedException`（含 `Path`、`FileDeleted`，半截文件已删除） |
 | 三方库内部失败 | `ImageBackendException`（保留 `InnerException`，含后端名） |
 | 原生库缺失 | `ImageBackendException`（含安装提示，不是裸 `DllNotFoundException`） |
+
+### `Save(path)` 失败时会删除目标文件
+
+`Save` / `SaveAsync` 直接写目标路径（不做"临时文件 + 改名"）。失败时会把写了一半的文件删掉，
+并抛 `ImageSaveFailedException`，消息里明确写着"已删除写了一半的目标文件"。
+
+```csharp
+try
+{
+    image.Save("out.jpg");
+}
+catch (ImageSaveFailedException ex)
+{
+    // ex.Path        目标路径
+    // ex.FileDeleted true = 半截文件已删掉；false = 删除也失败，可能残留
+    // ex.InnerException 真正的失败原因
+}
+```
+
+**代价**：目标路径原有的文件在保存开始时就被截断，失败后**不会恢复**。
+需要保留原件就自己先备份，或改用 `Encode()` 拿字节后自行落盘。
 
 路由只有两档：后端 `Try*` 返回 `true` 就原生执行，返回 `false` 就抛错。**没有跨后端自动回退**，行为在调用点可见。
 
@@ -488,7 +512,7 @@ docs/images/                       # 截图
 | 文件 | 内容 |
 |---|---|
 | [plan.md](plan.md) | 设计、公开 API、SPI、里程碑、验收标准、性能目标 |
-| [planv2.md](planv2.md) | 第一批加固：解码尺寸上限、`PixelLease` 幂等、OpenCV/Skia 像素搬运优化（含实测数据与后续批次清单） |
+| [planv2.md](planv2.md) | 三批加固：解码尺寸上限、`PixelLease` 幂等、像素搬运优化、`Save` 失败语义、NMS/张量化热路径（含实测数据与剩余清单） |
 | [misc.md](misc.md) | 决策记录、许可证矩阵、逐库的坑、测试策略、已否决方案、落地记录（§Z） |
 | [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) | 第三方组件与许可证清单 |
 

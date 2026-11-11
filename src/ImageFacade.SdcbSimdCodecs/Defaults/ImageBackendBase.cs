@@ -263,7 +263,8 @@ public abstract class ImageBackendBase : IImageBackend
         in EncodeRequest request,
         Stream destination)
     {
-        var writer = new ArrayBufferWriter<byte>(Math.Max(1024, width * height));
+        // 初值给保守量：PNG 常常要扩容，JPEG 用不到 width*height，按整图预分配在 4K 上等于白占 8 MB
+        var writer = new ArrayBufferWriter<byte>(64 * 1024);
         IImageEncoderSession session = entry.Registration.Create(writer, entry.OptionsFactory?.Invoke(request));
         IImageFrameEncoder frame = session.AddFrame(
             width,

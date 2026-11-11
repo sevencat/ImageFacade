@@ -220,6 +220,20 @@ public sealed class TensorizerTests
 
         Assert.Throws<ObjectDisposedException>(() => { _ = buffer.Span.Length; });
     }
+
+    [Fact]
+    public void TensorBuffer_Trim_Releases_Pool_Without_Breaking_Rents()
+    {
+        using (var buffer = TensorBuffer.Rent(640 * 640 * 3))
+        {
+            buffer.Span[0] = 42f;
+        }
+
+        TensorBuffer.Trim();
+
+        using var again = TensorBuffer.Rent(640 * 640 * 3);
+        Assert.Equal(640 * 640 * 3, again.Length);
+    }
 }
 
 public sealed class NmsTests
@@ -276,6 +290,53 @@ public sealed class NmsTests
     {
         Assert.Equal(0, Nms.Suppress(Span<Detection>.Empty));
         Assert.Empty(Nms.Select(ReadOnlySpan<Detection>.Empty));
+    }
+
+    [Fact]
+    public void Suppress_Handles_Many_Candidates_Deterministically()
+    {
+        // 模型原始输出常见上万候选框：这里用 2000 个覆盖超过插入排序阈值的路径
+        const int count = 2000;
+        var detections = new Detection[count];
+        for (int i = 0; i < count; i++)
+        {
+            // 每 4 个框叠在一起，分数递减 → 每组只应保留分数最高的那个
+            detections[i] = new Detection(new RectF((i % 25) * 40, (i % 20) * 40, 60, 60), $"d{i}", 1f - (i * 0.0004f));
+        }
+
+        var copy = (Detection[])detections.Clone();
+
+        int kept = Nms.Suppress(detections);
+
+        Assert.InRange(kept, 1, count);
+        Assert.Equal(kept, Nms.Suppress(copy));
+
+        // 同分时按原下标升序：结果与输入顺序一一对应，可复现
+        for (int i = 0; i < kept; i++)
+        {
+            Assert.Equal(detections[i].Label, copy[i].Label);
+        }
+    }
+
+    [Fact]
+    public void Select_And_Suppress_Agree_On_Many_Candidates()
+    {
+        const int count = 500;
+        var detections = new Detection[count];
+        for (int i = 0; i < count; i++)
+        {
+            detections[i] = new Detection(new RectF(i % 30 * 30, i % 30 * 30, 50, 50), $"d{i}", 0.9f - (i * 0.0005f));
+        }
+
+        Detection[] original = (Detection[])detections.Clone();
+        int kept = Nms.Suppress(detections);
+        int[] picked = Nms.Select(original);
+
+        Assert.Equal(kept, picked.Length);
+        for (int i = 0; i < kept; i++)
+        {
+            Assert.Equal(detections[i].Label, original[picked[i]].Label);
+        }
     }
 
     [Fact]

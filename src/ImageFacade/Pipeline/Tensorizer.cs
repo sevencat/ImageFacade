@@ -83,6 +83,16 @@ public static class Tensorizer
         bool rgb = options.Channels == ChannelOrder.Rgb;
         bool nchw = options.Layout == TensorLayout.Nchw;
 
+        // 把 mean/std 折成每通道一组 (scale, offset)：c = px * scale + offset。
+        // 这样内层循环里只剩乘加——原来每个像素每个通道一次浮点除法，是这条热路径的主要开销。
+        float scale0 = hasStd ? normalization / std[0] : normalization;
+        float scale1 = hasStd ? normalization / std[1] : normalization;
+        float scale2 = hasStd ? normalization / std[2] : normalization;
+
+        float offset0 = hasMean ? (hasStd ? -mean[0] / std[0] : -mean[0]) : 0f;
+        float offset1 = hasMean ? (hasStd ? -mean[1] / std[1] : -mean[1]) : 0f;
+        float offset2 = hasMean ? (hasStd ? -mean[2] / std[2] : -mean[2]) : 0f;
+
         for (int y = 0; y < height; y++)
         {
             int rowOffset = y * stride;
@@ -91,23 +101,13 @@ public static class Tensorizer
                 int offset = rowOffset + (x * 4);
 
                 // 通道顺序直接决定 c0/c2 取哪两个分量，避免循环里再套一层分支。
-                float c0 = (rgb ? pixels[offset] : pixels[offset + 2]) * normalization;
-                float c1 = pixels[offset + 1] * normalization;
-                float c2 = (rgb ? pixels[offset + 2] : pixels[offset]) * normalization;
+                float r = pixels[offset];
+                float g = pixels[offset + 1];
+                float b = pixels[offset + 2];
 
-                if (hasMean)
-                {
-                    c0 -= mean[0];
-                    c1 -= mean[1];
-                    c2 -= mean[2];
-                }
-
-                if (hasStd)
-                {
-                    c0 /= std[0];
-                    c1 /= std[1];
-                    c2 /= std[2];
-                }
+                float c0 = (rgb ? r : b) * scale0 + offset0;
+                float c1 = g * scale1 + offset1;
+                float c2 = (rgb ? b : r) * scale2 + offset2;
 
                 if (nchw)
                 {

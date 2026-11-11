@@ -13,21 +13,32 @@ public sealed class ImageEngine : IDisposable
 {
     private static ImageEngine? s_default;
 
+    private readonly bool _ownsBackend;
+
     private bool _disposed;
 
-    public ImageEngine(IImageBackend backend)
+    /// <param name="backend">要绑定的后端。</param>
+    /// <param name="ownsBackend">
+    /// <c>true</c>（默认）时 <see cref="Dispose"/> 会一并释放后端；由 DI 容器托管后端生命周期时传 <c>false</c>，
+    /// 否则容器与自己各释放一次。
+    /// </param>
+    public ImageEngine(IImageBackend backend, bool ownsBackend = true)
     {
         ArgumentNullException.ThrowIfNull(backend);
         Backend = backend;
+        _ownsBackend = ownsBackend;
     }
 
     public IImageBackend Backend { get; }
 
+    /// <summary>供 <see cref="FacadeImage"/> 判断所属引擎是否已释放。</summary>
+    internal bool IsDisposed => _disposed;
+
     /// <summary>可选全局默认，必须显式赋值——门面不做任何自动探测。</summary>
     public static ImageEngine? Default
     {
-        get => s_default;
-        set => s_default = value;
+        get => Volatile.Read(ref s_default);
+        set => Volatile.Write(ref s_default, value);
     }
 
     public bool CanDecode(ImageFormat format) => Backend.SupportedDecodeFormats.Contains(format);
@@ -355,6 +366,9 @@ public sealed class ImageEngine : IDisposable
         }
 
         _disposed = true;
-        Backend.Dispose();
+        if (_ownsBackend)
+        {
+            Backend.Dispose();
+        }
     }
 }

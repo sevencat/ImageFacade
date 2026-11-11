@@ -10,33 +10,16 @@ public static class BuiltInFont
 {
     private const string ResourceName = "ImageFacade.Fonts.WenQuanYiMicroHei.ttf.gz";
 
-    private static ReadOnlyMemory<byte>? _data;
-
-    private static readonly object Gate = new();
+    /// <summary>
+    /// 用 <see cref="Lazy{T}"/> 而不是手写双检锁：<see cref="ReadOnlyMemory{T}"/> 是"引用 + 长度"的
+    /// 多字段结构，非原子发布，普通字段的双检锁可能让另一个线程读到撕裂值。
+    /// </summary>
+    private static readonly Lazy<ReadOnlyMemory<byte>> LazyData = new(
+        Load,
+        LazyThreadSafetyMode.ExecutionAndPublication);
 
     /// <summary>字体文件（TTF）字节；首次访问时解压并缓存。</summary>
-    public static ReadOnlyMemory<byte> Data
-    {
-        get
-        {
-            if (_data is { } cached)
-            {
-                return cached;
-            }
-
-            lock (Gate)
-            {
-                if (_data is { } again)
-                {
-                    return again;
-                }
-
-                ReadOnlyMemory<byte> loaded = Load();
-                _data = loaded;
-                return loaded;
-            }
-        }
-    }
+    public static ReadOnlyMemory<byte> Data => LazyData.Value;
 
     private static ReadOnlyMemory<byte> Load()
     {

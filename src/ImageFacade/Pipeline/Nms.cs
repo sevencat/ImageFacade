@@ -11,6 +11,9 @@ public static class Nms
 {
     private const float DefaultIouThreshold = 0.45f;
 
+    /// <summary>小于等于这个数量就用插入排序：典型 n≈300 时它比通用排序更快，且零分配。</summary>
+    private const int InsertionSortThreshold = 32;
+
     /// <summary>
     /// 原地抑制：按分数降序重排后把保留项前移到开头，返回保留数量
     /// （调用方用 <c>detections[..count]</c> 取有效段）。
@@ -172,36 +175,112 @@ public static class Nms
         }
     }
 
-    /// <summary>插入排序：分数降序，相同分数保持原相对顺序（结果可复现）。</summary>
+    /// <summary>
+    /// 分数降序排序，**同分保持原相对顺序**（结果可复现）。
+    /// </summary>
+    /// <remarks>
+    /// 小规模（≤ <see cref="InsertionSortThreshold"/>）用插入排序：天然稳定、零分配。
+    /// 大规模改用「下标 + 双键排序」——比较器同时比分数与原下标，任何排序算法结果都唯一，
+    /// 等价于稳定排序。模型原始输出常有上万候选框，插入排序的 O(n²) 会直接卡住帧。
+    /// </remarks>
     private static void SortByScoreDescending(Span<Detection> detections)
     {
-        for (int i = 1; i < detections.Length; i++)
+        int count = detections.Length;
+        if (count < 2)
         {
-            Detection current = detections[i];
-            int j = i - 1;
-            while (j >= 0 && detections[j].Score < current.Score)
+            return;
+        }
+
+        if (count <= InsertionSortThreshold)
+        {
+            for (int i = 1; i < count; i++)
             {
-                detections[j + 1] = detections[j];
-                j--;
+                Detection current = detections[i];
+                int j = i - 1;
+                while (j >= 0 && detections[j].Score < current.Score)
+                {
+                    detections[j + 1] = detections[j];
+                    j--;
+                }
+
+                detections[j + 1] = current;
             }
 
-            detections[j + 1] = current;
+            return;
+        }
+
+        Detection[] rented = ArrayPool<Detection>.Shared.Rent(count);
+        int[] rentedOrder = ArrayPool<int>.Shared.Rent(count);
+        try
+        {
+            Span<int> order = rentedOrder.AsSpan(0, count);
+            for (int i = 0; i < count; i++)
+            {
+                rented[i] = detections[i];
+                order[i] = i;
+            }
+
+            order.Sort((a, b) =>
+            {
+                int byScore = rented[b].Score.CompareTo(rented[a].Score);
+                return byScore != 0 ? byScore : a.CompareTo(b);
+            });
+
+            for (int i = 0; i < count; i++)
+            {
+                detections[i] = rented[order[i]];
+            }
+        }
+        finally
+        {
+            ArrayPool<Detection>.Shared.Return(rented);
+            ArrayPool<int>.Shared.Return(rentedOrder);
         }
     }
 
     private static void SortIndicesByScoreDescending(ReadOnlySpan<Detection> detections, Span<int> order)
     {
-        for (int i = 1; i < order.Length; i++)
+        int count = order.Length;
+        if (count < 2)
         {
-            int current = order[i];
-            int j = i - 1;
-            while (j >= 0 && detections[order[j]].Score < detections[current].Score)
+            return;
+        }
+
+        if (count <= InsertionSortThreshold)
+        {
+            for (int i = 1; i < count; i++)
             {
-                order[j + 1] = order[j];
-                j--;
+                int current = order[i];
+                int j = i - 1;
+                while (j >= 0 && detections[order[j]].Score < detections[current].Score)
+                {
+                    order[j + 1] = order[j];
+                    j--;
+                }
+
+                order[j + 1] = current;
             }
 
-            order[j + 1] = current;
+            return;
+        }
+
+        Detection[] rented = ArrayPool<Detection>.Shared.Rent(count);
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                rented[i] = detections[i];
+            }
+
+            order.Sort((a, b) =>
+            {
+                int byScore = rented[b].Score.CompareTo(rented[a].Score);
+                return byScore != 0 ? byScore : a.CompareTo(b);
+            });
+        }
+        finally
+        {
+            ArrayPool<Detection>.Shared.Return(rented);
         }
     }
 }

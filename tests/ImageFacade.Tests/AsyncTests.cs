@@ -127,6 +127,8 @@ internal sealed class PngFakeBackend : FakeBackend
 /// <summary>实现了可选异步 SPI 的后端，用来验证门面优先走异步接口。</summary>
 internal sealed class AsyncFakeBackend : FakeBackend, IAsyncImageBackend
 {
+    private static readonly IReadOnlySet<ImageFormat> PngOnly = new HashSet<ImageFormat> { ImageFormat.Png };
+
     public AsyncFakeBackend()
         : base("async-fake")
     {
@@ -135,6 +137,9 @@ internal sealed class AsyncFakeBackend : FakeBackend, IAsyncImageBackend
     public int AsyncDecodeCalls { get; private set; }
 
     public int AsyncEncodeCalls { get; private set; }
+
+    /// <summary>异步路径同样要经过能力表检查，所以这里必须声明 PNG。</summary>
+    public override IReadOnlySet<ImageFormat> SupportedEncodeFormats => PngOnly;
 
     public Task<DecodedImage> DecodeAsync(ReadOnlyMemory<byte> data, DecodeRequest request, CancellationToken cancellationToken)
     {

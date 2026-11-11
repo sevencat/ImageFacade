@@ -85,7 +85,7 @@ public sealed class SkiaBackend : IImageBackend
 
     public IFrame Decode(ReadOnlySpan<byte> data, in DecodeRequest request, out ImageMetadata metadata)
     {
-        using SKData encoded = SKData.CreateCopy(data.ToArray());
+        using SKData encoded = CreateData(data);
         using SKCodec codec = SKCodec.Create(encoded) ?? throw new ImageBackendException(Name, "无法识别的图像格式。");
 
         SKImageInfo info = new(codec.Info.Width, codec.Info.Height, SKColorType.Rgba8888, SKAlphaType.Premul);
@@ -298,56 +298,36 @@ public sealed class SkiaBackend : IImageBackend
         }
 
         var target = (SkiaFrame)frame;
-        SKTypeface typeface = ResolveTypeface(spec.Style.Font, out bool ownsTypeface);
-        try
-        {
-            using var font = new SKFont(typeface, spec.Style.Size)
-            {
-                Edging = SKFontEdging.Antialias,
-                Subpixel = false,
-            };
+        SKTypeface typeface = ResolveTypeface(spec.Style.Font);
 
-            using SKPaint paint = FillPaint(spec.Style.Color, spec.Style.Antialias);
-            float baseline = spec.Style.Anchor == TextAnchor.Baseline
-                ? spec.Origin.Y
-                : spec.Origin.Y - font.Metrics.Ascent;
-
-            target.Canvas.DrawText(spec.Text, spec.Origin.X, baseline, SKTextAlign.Left, font, paint);
-            return true;
-        }
-        finally
+        using var font = new SKFont(typeface, spec.Style.Size)
         {
-            if (ownsTypeface)
-            {
-                typeface.Dispose();
-            }
-        }
+            Edging = SKFontEdging.Antialias,
+            Subpixel = false,
+        };
+
+        using SKPaint paint = FillPaint(spec.Style.Color, spec.Style.Antialias);
+        float baseline = spec.Style.Anchor == TextAnchor.Baseline
+            ? spec.Origin.Y
+            : spec.Origin.Y - font.Metrics.Ascent;
+
+        target.Canvas.DrawText(spec.Text, spec.Origin.X, baseline, SKTextAlign.Left, font, paint);
+        return true;
     }
 
     public bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
     {
-        SKTypeface typeface;
         try
         {
-            typeface = ResolveTypeface(spec.Style.Font, out bool owns);
-            try
-            {
-                using var font = new SKFont(typeface, spec.Style.Size);
-                SKFontMetrics fontMetrics = font.Metrics;
-                float ascent = MathF.Abs(fontMetrics.Ascent);
-                float descent = MathF.Abs(fontMetrics.Descent);
-                float leading = MathF.Max(0f, fontMetrics.Leading);
+            SKTypeface typeface = ResolveTypeface(spec.Style.Font);
+            using var font = new SKFont(typeface, spec.Style.Size);
+            SKFontMetrics fontMetrics = font.Metrics;
+            float ascent = MathF.Abs(fontMetrics.Ascent);
+            float descent = MathF.Abs(fontMetrics.Descent);
+            float leading = MathF.Max(0f, fontMetrics.Leading);
 
-                metrics = new TextMetrics(font.MeasureText(spec.Text), ascent, descent, leading);
-                return true;
-            }
-            finally
-            {
-                if (owns)
-                {
-                    typeface.Dispose();
-                }
-            }
+            metrics = new TextMetrics(font.MeasureText(spec.Text), ascent, descent, leading);
+            return true;
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
         {
@@ -514,6 +494,18 @@ public sealed class SkiaBackend : IImageBackend
 
     // ---- 内部 ----
 
+    /// <summary>
+    /// 把托管字节交给 Skia：用固定指针直接拷贝，省掉 <c>data.ToArray()</c> 那一份中间副本
+    /// （4K JPEG 是 8 MB 级别的白拷）。
+    /// </summary>
+    private static unsafe SKData CreateData(ReadOnlySpan<byte> data)
+    {
+        fixed (byte* pointer = data)
+        {
+            return SKData.CreateCopy((IntPtr)pointer, (ulong)data.Length);
+        }
+    }
+
     private IFrame Import(ReadOnlySpan<byte> straight, int width, int height)
     {
         var frame = (SkiaFrame)Create(width, height, background: null);
@@ -537,41 +529,29 @@ public sealed class SkiaBackend : IImageBackend
         return buffer;
     }
 
-    private SKTypeface ResolveTypeface(FontRef reference, out bool ownsTypeface)
+    /// <summary>
+    /// 解析字体引用，结果全部按 <see cref="FontRef"/> 缓存、由本后端统一释放。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 自备字体（<see cref="FontRef.Data"/> / <see cref="FontRef.FilePath"/>）以前每次绘制都重建
+    /// <see cref="SKTypeface"/>（整表解析），视频叠加这类逐帧画字的场景等于按帧付费。现在统一走缓存。
+    /// </para>
+    /// <para>
+    /// 唯一不入缓存的是 <see cref="SKTypeface.Default"/>：它归 Skia 所有，一旦进了字典，
+    /// <see cref="Dispose"/> 会把它释放掉，进程内其他使用方随后拿到已释放对象。
+    /// </para>
+    /// </remarks>
+    private SKTypeface ResolveTypeface(FontRef reference)
     {
-        if (reference.Data is { } data)
-        {
-            using SKData fontData = SKData.CreateCopy(data.ToArray());
-            SKTypeface? fromData = SKTypeface.FromData(fontData);
-            if (fromData is not null)
-            {
-                ownsTypeface = true;
-                return fromData;
-            }
-        }
-
-        if (reference.FilePath is { } path && File.Exists(path))
-        {
-            SKTypeface? fromFile = SKTypeface.FromFile(path);
-            if (fromFile is not null)
-            {
-                ownsTypeface = true;
-                return fromFile;
-            }
-        }
-
-        ownsTypeface = false;
-
         if (_typefaces.TryGetValue(reference, out SKTypeface? cached) && cached is not null)
         {
             return cached;
         }
 
-        SKTypeface? created = CreateBuiltInTypeface();
+        SKTypeface? created = CreateTypeface(reference);
         if (created is null)
         {
-            // 创建失败时返回进程级默认字体，但**绝不入缓存**：SKTypeface.Default 归 Skia 所有，
-            // 一旦进了 _typefaces，Dispose() 会把它释放掉，进程内其他使用方随后拿到的是已释放对象。
             return SKTypeface.Default;
         }
 
@@ -584,10 +564,37 @@ public sealed class SkiaBackend : IImageBackend
         return stored;
     }
 
-    private static SKTypeface? CreateBuiltInTypeface()
+    private static SKTypeface? CreateTypeface(FontRef reference)
     {
-        using SKData builtIn = SKData.CreateCopy(BuiltInFont.Data.ToArray());
-        return SKTypeface.FromData(builtIn);
+        if (reference.Data is { } data)
+        {
+            return CreateFromBytes(data.Span);
+        }
+
+        if (reference.FilePath is { } path)
+        {
+            try
+            {
+                // 不用 SKTypeface.FromFile：它会一直持有文件句柄，缓存期间字体文件就无法更新 / 删除。
+                // 读一次字节（几 MB）换句柄释放，注册后不再重复读。
+                return CreateFromBytes(File.ReadAllBytes(path));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // 文件不可读：退回内置字体（与 FromFile 返回 null 的行为一致）
+            }
+        }
+
+        return CreateFromBytes(BuiltInFont.Data.Span);
+    }
+
+    private static unsafe SKTypeface? CreateFromBytes(ReadOnlySpan<byte> bytes)
+    {
+        fixed (byte* pointer = bytes)
+        {
+            using SKData data = SKData.CreateCopy((IntPtr)pointer, (ulong)bytes.Length);
+            return SKTypeface.FromData(data);
+        }
     }
 
     /// <summary>

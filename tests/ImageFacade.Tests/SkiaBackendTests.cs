@@ -117,6 +117,22 @@ public sealed class SkiaBackendTests
     }
 
     [Fact]
+    public void Resize_BoxPad_Does_Not_Upscale()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(20, 20, Rgba32.White);
+
+        // 源图比目标框小：BoxPad 保持原尺寸居中补边（Pad 会放大到 60x60）
+        image.Resize(new ResizeOptions { Width = 60, Height = 60, Mode = ResizeMode.BoxPad, PadColor = Rgba32.Red });
+
+        Assert.Equal(60, image.Width);
+        Assert.Equal(60, image.Height);
+        Assert.Equal(Rgba32.Red, image.GetPixel(2, 2));
+        Assert.Equal(Rgba32.White, image.GetPixel(30, 30));
+        Assert.Equal(Rgba32.Red, image.GetPixel(57, 57));
+    }
+
+    [Fact]
     public void Png_RoundTrip_Preserves_Pixels()
     {
         using var engine = CreateEngine();
@@ -197,6 +213,38 @@ public sealed class SkiaBackendTests
         other.DrawText("A", new PointF(4, 4), new TextStyle { Size = 24, Color = Rgba32.Black });
 
         Assert.True(CountDarkPixels(other) > 20, "另一个后端实例应该仍能画字");
+    }
+
+    [Fact]
+    public void Custom_Font_File_Renders_Consistently_Across_Calls()
+    {
+        // 自备字体现在走缓存：同一 FontRef 反复画字应得到完全相同的结果
+        string path = Path.Combine(Path.GetTempPath(), $"imagefacade-font-{Guid.NewGuid():N}.ttf");
+        File.WriteAllBytes(path, BuiltInFont.Data.ToArray());
+
+        try
+        {
+            using var engine = CreateEngine();
+            using FacadeImage first = engine.Create(120, 60, Rgba32.White);
+            using FacadeImage second = engine.Create(120, 60, Rgba32.White);
+
+            var style = new TextStyle
+            {
+                Font = FontRef.FromFile(path),
+                Size = 32,
+                Color = Rgba32.Black,
+            };
+
+            first.DrawText("字A", new PointF(4, 4), style);
+            second.DrawText("字A", new PointF(4, 4), style);
+
+            Assert.Equal(first.CopyPixels(), second.CopyPixels());
+            Assert.True(CountDarkPixels(first) > 20);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     private static int CountDarkPixels(FacadeImage image)

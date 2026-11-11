@@ -291,7 +291,7 @@ internal class FakeBackend : IImageBackend
         return true;
     }
 
-    public void Dispose()
+    public virtual void Dispose()
     {
     }
 

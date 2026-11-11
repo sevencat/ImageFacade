@@ -33,9 +33,21 @@ internal static class GlyphRasterizer
         var top = (int)MathF.Floor(minY);
         var width = (int)MathF.Ceiling(maxX) - left;
         var height = (int)MathF.Ceiling(maxY) - top;
-        if (width <= 0 || height <= 0 || width > MaxMaskSize || height > MaxMaskSize)
+
+        if (width <= 0 || height <= 0)
         {
             return GlyphMask.Blank(advance);
+        }
+
+        if (width > MaxMaskSize || height > MaxMaskSize)
+        {
+            // 以前这里是静默返回空白：字号大到画不出来时用户什么也看不到。
+            // 现在明确报错——托管文字后端（软后端 / OpenCV）拼写错误或单位搞混时会立刻暴露。
+            throw new ArgumentOutOfRangeException(
+                nameof(scale),
+                scale,
+                $"字形位图 {width}x{height} 超过单字形上限 {MaxMaskSize}×{MaxMaskSize} 像素。"
+                    + "请减小字号（TextStyle.Size），或改用矢量路径 / 系统字体后端。");
         }
 
         var coverage = new byte[width * height];

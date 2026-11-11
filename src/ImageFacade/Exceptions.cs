@@ -56,3 +56,62 @@ public sealed class ImageSizeLimitExceededException : Exception
     /// <summary>当时生效的上限（像素数）。</summary>
     public long MaxPixels { get; }
 }
+
+/// <summary>
+/// 保存到文件失败。<see cref="FacadeImage.Save(string, SaveOptions?)"/> 不做"临时文件 + 改名"，
+/// 而是直接写目标路径；中途失败会把已写了一半的文件删掉，避免留下半截图片。
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>注意</b>：目标路径原有的文件在保存开始时就被截断，失败后**不会恢复**——这是"直接保存"的代价。
+/// 需要保留原件就由调用方自己先备份，或改用 <see cref="FacadeImage.Encode"/> 拿字节后自行落盘。
+/// </para>
+/// <para>
+/// <see cref="FileDeleted"/> 为 <c>true</c> 表示半截文件已被删除；为 <c>false</c> 表示删除也失败了，
+/// 目标路径可能残留一个不完整的文件。
+/// </para>
+/// </remarks>
+public sealed class ImageSaveFailedException : Exception
+{
+    public ImageSaveFailedException(string path, bool fileDeleted, Exception innerException)
+        : base(BuildMessage(path, fileDeleted, innerException), innerException)
+    {
+        Path = path;
+        FileDeleted = fileDeleted;
+    }
+
+    /// <summary>写入失败的目标路径（调用方给的原样值）。</summary>
+    public string Path { get; }
+
+    /// <summary>半截文件是否已删除。<c>false</c> 表示删除失败、可能残留。</summary>
+    public bool FileDeleted { get; }
+
+    /// <summary>删除目标文件并构造异常；删除结果如实反映在 <see cref="FileDeleted"/> 上。</summary>
+    internal static ImageSaveFailedException For(string path, Exception inner)
+        => new(path, TryDeleteFile(path), inner);
+
+    private static string BuildMessage(string path, bool deleted, Exception inner)
+        => $"保存到 '{path}' 失败：{inner.Message} "
+            + (deleted
+                ? "已删除写了一半的目标文件。"
+                : "目标文件删除失败，可能残留不完整的内容。");
+
+    /// <summary>删掉半截文件；删不掉返回 false（不让清理失败盖住真正的异常）。</summary>
+    internal static bool TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        return !File.Exists(path);
+    }
+}

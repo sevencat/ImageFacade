@@ -1,4 +1,5 @@
-﻿using Xunit;
+﻿using ImageFacade.Text.Engine;
+using Xunit;
 
 namespace ImageFacade.Tests;
 
@@ -59,5 +60,32 @@ public sealed class FontTests
         {
             File.Delete(path);
         }
+    }
+
+    [Fact]
+    public void Glyph_Mask_Is_Cached_Per_CodePoint_And_Size()
+    {
+        Font font = Font.Load(BuiltInFont.Data.ToArray());
+
+        GlyphMask first = font.GetGlyphMask('A', 24f);
+        GlyphMask second = font.GetGlyphMask('A', 24f);
+
+        Assert.Same(first, second);
+        Assert.True(font.CachedMaskCount >= 1);
+
+        // 不同字号是不同的缓存项
+        _ = font.GetGlyphMask('A', 32f);
+        Assert.True(font.CachedMaskCount >= 2);
+    }
+
+    [Fact]
+    public void Oversized_Glyph_Throws_Instead_Of_Silently_Blank()
+    {
+        Font font = Font.Load(BuiltInFont.Data.ToArray());
+
+        // 单字形位图上限 4096×4096；字号大到画不出来时必须报错，而不是返回空白让用户以为"没字"
+        var error = Assert.Throws<ArgumentOutOfRangeException>(() => font.GetGlyphMask('A', 20000f));
+
+        Assert.Contains("4096", error.Message);
     }
 }

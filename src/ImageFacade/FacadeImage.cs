@@ -70,6 +70,13 @@ public sealed class FacadeImage : IDisposable
 
         ResizePlan plan = ResizePlanner.Plan(Width, Height, options.Width, options.Height, options.Mode);
 
+        // 没有裁剪 / 补边：直接换帧，不多拷一次
+        if (!plan.NeedsComposite)
+        {
+            ResizeCore(plan.ScaledWidth, plan.ScaledHeight, options.Sampler);
+            return this;
+        }
+
         // 合成需要的两块缓冲都可能到 MB 级（1080p 缩放约 8 MB），走池避免每帧进 LOH
         byte[] scaled = ArrayPool<byte>.Shared.Rent(checked(plan.ScaledWidth * 4 * plan.ScaledHeight));
         byte[] output = ArrayPool<byte>.Shared.Rent(checked(plan.OutputWidth * 4 * plan.OutputHeight));
@@ -299,6 +306,16 @@ public sealed class FacadeImage : IDisposable
 
     // ---- 输出 ----
 
+    /// <summary>
+    /// 保存到文件，格式按扩展名推断。
+    /// </summary>
+    /// <remarks>
+    /// 直接用 <see cref="File.Create(string)"/> 写目标路径：编码失败时会把写了一半的文件删掉，
+    /// 并抛 <see cref="ImageSaveFailedException"/>（内含原始异常）。
+    /// <b>目标路径原有文件在开始时就被截断，失败后不恢复</b>——需要保留原件请先自行备份，
+    /// 或改用 <see cref="Encode"/> 拿字节后自己落盘。
+    /// </remarks>
+    /// <exception cref="ImageSaveFailedException">写入或编码失败；文件已删除（见 <see cref="ImageSaveFailedException.FileDeleted"/>）。</exception>
     public void Save(string path, SaveOptions? options = null)
     {
         ThrowIfDisposed();
@@ -311,8 +328,21 @@ public sealed class FacadeImage : IDisposable
             throw new ArgumentException($"无法从扩展名推断保存格式：'{path}'。请显式设置 SaveOptions.Format。", nameof(path));
         }
 
-        using FileStream stream = File.Create(path);
-        SaveCore(stream, save, format);
+        FileStream? stream = null;
+        try
+        {
+            stream = File.Create(path);
+            using (stream)
+            {
+                SaveCore(stream, save, format);
+            }
+        }
+        catch (Exception ex) when (stream is not null)
+        {
+            // 能走到这里说明文件已经被创建 / 截断过，留下的是半截内容：删掉它再报错。
+            // File.Create 自己失败的情况（权限、目录不存在）走不到这里——那时文件没被碰过，不能删。
+            throw ImageSaveFailedException.For(path, ex);
+        }
     }
 
     public void Save(Stream stream, SaveOptions? options = null)
@@ -335,6 +365,11 @@ public sealed class FacadeImage : IDisposable
 
     // ---- 异步输出（I/O 真异步；编码走后端异步接口，否则 Task.Run） ----
 
+    /// <summary>
+    /// 异步保存到文件。编码成功后才碰磁盘；写盘失败同样删除半截文件并抛
+    /// <see cref="ImageSaveFailedException"/>。被取消时删除文件后原样抛 <see cref="OperationCanceledException"/>。
+    /// </summary>
+    /// <exception cref="ImageSaveFailedException">写入或编码失败；文件已删除。</exception>
     public async Task SaveAsync(string path, SaveOptions? options = null, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -347,8 +382,22 @@ public sealed class FacadeImage : IDisposable
             throw new ArgumentException($"无法从扩展名推断保存格式：'{path}'。请显式设置 SaveOptions.Format。", nameof(path));
         }
 
+        // 编码失败时还没碰过文件，直接抛原异常
         byte[] encoded = await EncodeToArrayAsync(save, format, cancellationToken).ConfigureAwait(false);
-        await File.WriteAllBytesAsync(path, encoded, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await File.WriteAllBytesAsync(path, encoded, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            ImageSaveFailedException.TryDeleteFile(path);   // 取消也要删掉半截文件，但异常照原样抛
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw ImageSaveFailedException.For(path, ex);
+        }
     }
 
     public async Task SaveAsync(Stream stream, SaveOptions? options = null, CancellationToken cancellationToken = default)
@@ -359,6 +408,7 @@ public sealed class FacadeImage : IDisposable
         SaveOptions save = options ?? new SaveOptions();
         ImageFormat format = save.Format ?? ImageFormat.Png;
         ValidateSaveOptions(save);
+        EnsureCanEncode(format);
 
         if (_backend is IAsyncImageBackend asyncBackend)
         {
@@ -389,6 +439,7 @@ public sealed class FacadeImage : IDisposable
     private async Task<byte[]> EncodeToArrayAsync(SaveOptions save, ImageFormat format, CancellationToken cancellationToken)
     {
         ValidateSaveOptions(save);
+        EnsureCanEncode(format);
 
         if (_backend is IAsyncImageBackend asyncBackend)
         {
@@ -427,6 +478,18 @@ public sealed class FacadeImage : IDisposable
         if (save.CompressionLevel is < -1 or > 9)
         {
             throw new ArgumentOutOfRangeException(nameof(SaveOptions.CompressionLevel), save.CompressionLevel, "CompressionLevel 必须在 -1..9。");
+        }
+    }
+
+    /// <summary>
+    /// 编码能力检查。同步与异步路径共用：异步分支不能因为绕开 <see cref="SaveCore"/>
+    /// 就放过"后端不支持该格式"。
+    /// </summary>
+    private void EnsureCanEncode(ImageFormat format)
+    {
+        if (!_backend.SupportedEncodeFormats.Contains(format))
+        {
+            throw new FeatureNotSupportedException("Encode", _backend.Name);
         }
     }
 
@@ -579,13 +642,27 @@ public sealed class FacadeImage : IDisposable
             return;
         }
 
+        ReplaceFrame(ResizeFrame(width, height, sampler), width, height);
+    }
+
+    /// <summary>
+    /// 真正做一次拉伸，返回**新帧**（不改当前帧）。尺寸相同则返回当前帧的克隆，
+    /// 这样调用方总能无条件 Dispose 拿到的帧。
+    /// </summary>
+    private IFrame ResizeFrame(int width, int height, Sampler sampler)
+    {
+        if (width == Width && height == Height)
+        {
+            return _backend.Clone(Frame);
+        }
+
         var request = new ResizeRequest(width, height, sampler);
         if (!_backend.TryResize(Frame, in request, out IFrame resized))
         {
             throw new FeatureNotSupportedException(nameof(Resize), _backend.Name);
         }
 
-        ReplaceFrame(resized, width, height);
+        return resized;
     }
 
     internal TextMetrics MeasureSingleLine(string text, TextStyle style)
@@ -602,11 +679,7 @@ public sealed class FacadeImage : IDisposable
     private void SaveCore(Stream stream, SaveOptions save, ImageFormat format)
     {
         ValidateSaveOptions(save);
-
-        if (!_backend.SupportedEncodeFormats.Contains(format))
-        {
-            throw new FeatureNotSupportedException("Encode", _backend.Name);
-        }
+        EnsureCanEncode(format);
 
         var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata);
         EncodableFrame encodable = PrepareForEncode(save, format);
@@ -744,18 +817,6 @@ public sealed class FacadeImage : IDisposable
 
     // ---- 辅助 ----
 
-    private byte[] CopyCanonicalPixels(out int stride)
-    {
-        stride = Width * 4;
-        var buffer = new byte[checked(stride * Height)];
-        if (!_backend.TryCopyPixels(Frame, buffer, stride))
-        {
-            throw new FeatureNotSupportedException(nameof(CopyPixels), _backend.Name);
-        }
-
-        return buffer;
-    }
-
     private void ReplaceFrame(IFrame frame, int width, int height)
     {
         IFrame previous = Frame;
@@ -765,10 +826,10 @@ public sealed class FacadeImage : IDisposable
         _metadata = new ImageMetadata(_metadata.Format, width, height, _metadata.Orientation, _metadata.HasAlpha, _metadata.IccProfile);
     }
 
-    private static void Fill(byte[] buffer, Rgba32 color)
+    private static void Fill(Span<byte> buffer, Rgba32 color)
     {
         uint packed = (uint)(color.R | (color.G << 8) | (color.B << 16) | (color.A << 24));
-        MemoryMarshal.Cast<byte, uint>(buffer.AsSpan()).Fill(packed);
+        MemoryMarshal.Cast<byte, uint>(buffer).Fill(packed);
     }
 
     private static void Blit(
@@ -801,6 +862,14 @@ public sealed class FacadeImage : IDisposable
         if (_frame is null)
         {
             throw new ObjectDisposedException(nameof(FacadeImage));
+        }
+
+        // 引擎释放后后端可能已经把字体 / 画布收掉了，继续用这张图会拿到半失效的对象
+        if (_engine.IsDisposed)
+        {
+            throw new ObjectDisposedException(
+                nameof(ImageEngine),
+                "所属的 ImageEngine 已释放，这张图不能再使用。请先完成图片操作，再释放引擎。");
         }
     }
 
