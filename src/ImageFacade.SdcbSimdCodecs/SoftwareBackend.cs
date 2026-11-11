@@ -305,6 +305,28 @@ public sealed class SoftwareBackend : ImageBackendBase
         return true;
     }
 
+    /// <summary>
+    /// 带着门面给的 alpha 提示导出：<c>assumeOpaque == true</c>（门面查过，整图 alpha 全 255）时
+    /// <see cref="Canvas.CopyToStraight(Span{byte}, int, bool?)"/> 不再顺手判透明、也不做逐像素反预乘
+    /// （全不透明时它本身就是一次整块拷贝）。<c>null</c> 交回自动探测，结果完全一致。
+    /// </summary>
+    public override bool TryCopyPixels(IFrame frame, Span<byte> destination, int destinationStride, bool? assumeOpaque)
+    {
+        var source = (SoftwareFrame)frame;
+        source.Canvas.CopyToStraight(destination, destinationStride, assumeOpaque);
+        return true;
+    }
+
+    /// <summary>
+    /// 直接扫 Canvas 自己那块内存（预乘不改 alpha 的值），不走 <see cref="TryCopyPixels(IFrame, Span{byte}, int)"/>：
+    /// 后者要整图反预乘一遍，为了判断"有没有透明"再搬一次纯属浪费。
+    /// </summary>
+    public override bool TryGetTransparency(IFrame frame, out bool hasTransparency)
+    {
+        hasTransparency = !((SoftwareFrame)frame).Canvas.IsFullyOpaque();
+        return true;
+    }
+
     public override void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride)
     {
         var target = (SoftwareFrame)frame;

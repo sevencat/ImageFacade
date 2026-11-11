@@ -106,4 +106,25 @@ public interface IImageBackend : IDisposable
     void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride);
 
     bool TryAcquirePixels(IFrame frame, out PixelLease lease);
+
+    // ---- alpha 探测 ----
+
+    /// <summary>
+    /// 后端能否**直接**回答"这张图里是否真的存在 alpha &lt; 255 的像素"（不做导出 / 反预乘，只读自己那块内存）。
+    /// </summary>
+    /// <returns>
+    /// <c>true</c>：<paramref name="hasTransparency"/> 是准确答案，门面直接采信；
+    /// <c>false</c>（默认实现）：不知道，门面会退回通用的像素扫描
+    /// （<see cref="FacadeImage.DetectTransparency(bool)"/>），后端本身不必做任何事。
+    /// </returns>
+    /// <remarks>
+    /// 这是个纯优化钩子：加载时检查一次（<see cref="LoadOptions.DetectTransparency"/>）就能让编码路径
+    /// 跳过"全不透明的图也要合成 / 反预乘"的无用功。返回 <c>false</c> 永远不会改变可观察结果，
+    /// 只是让门面多扫一遍像素——所以老后端一行都不用改。
+    /// </remarks>
+    bool TryGetTransparency(IFrame frame, out bool hasTransparency)
+    {
+        hasTransparency = false;
+        return false;
+    }
 }

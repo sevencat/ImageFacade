@@ -153,10 +153,14 @@ public sealed class OpenCvBackend : IImageBackend
                 throw new ImageBackendException(Name, "无法识别的图像格式。");
             }
 
+            // 补通道之前看原图有没有 alpha：2 通道（灰度+alpha）/ 4 通道才有，
+            // 3 通道与单通道被 ToBgra 补出来的 255 不算"有 alpha 通道"。
+            bool hasAlpha = decoded.Channels() is 2 or 4;
+
             CvMat bgra = ToBgra(decoded);
             transferred = ReferenceEquals(bgra, decoded);
 
-            metadata = new ImageMetadata(SniffFormat(data), bgra.Cols, bgra.Rows);
+            metadata = new ImageMetadata(SniffFormat(data), bgra.Cols, bgra.Rows, orientation: 0, hasAlpha: hasAlpha);
             return new OpenCvFrame(bgra);
         }
         finally
@@ -595,6 +599,43 @@ public sealed class OpenCvBackend : IImageBackend
         TryCopyPixels(target, buffer, stride);
 
         lease = new PixelLease(buffer, stride, () => ImportPixels(target, buffer, stride));
+        return true;
+    }
+
+    /// <summary>
+    /// 直接扫 Mat 自己的内存（帧固定是 <c>CV_8UC4</c> BGRA，alpha 在每像素第 4 字节），
+    /// 不交换通道、不拷一份。
+    /// </summary>
+    public bool TryGetTransparency(IFrame frame, out bool hasTransparency)
+    {
+        hasTransparency = false;
+
+        CvMat mat = ((OpenCvFrame)frame).Mat;
+        if (mat.Type() != CvMatType.CV_8UC4 || mat.Empty())
+        {
+            return false;   // 别的位深 / 通道数不猜，交给门面走 TryAcquirePixels 扫
+        }
+
+        int rowBytes = mat.Cols * 4;
+        int rows = mat.Rows;
+        long step = mat.Step();
+        unsafe
+        {
+            byte* data = (byte*)mat.Data;
+            for (int y = 0; y < rows; y++)
+            {
+                byte* row = data + (y * step);
+                for (int x = 3; x < rowBytes; x += 4)
+                {
+                    if (row[x] != 255)
+                    {
+                        hasTransparency = true;
+                        return true;
+                    }
+                }
+            }
+        }
+
         return true;
     }
 

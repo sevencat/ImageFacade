@@ -60,6 +60,21 @@ internal class FakeBackend : IImageBackend
     /// <summary>整帧导入次数（用来断言批量回退只往返一次）。</summary>
     public int ImportCalls { get; private set; }
 
+    /// <summary>
+    /// 后端对"有没有半透明像素"的回答：<c>null</c>（默认）= 不知道，让门面自己扫；
+    /// 非 <c>null</c> = 我知道，别扫了。
+    /// </summary>
+    public bool? TransparencyAnswer { get; set; }
+
+    /// <summary>被门面问过几次 alpha 结论。</summary>
+    public int TransparencyQueries { get; private set; }
+
+    /// <summary>像素视图被借出几次（门面扫 alpha 走的就是这条路）。</summary>
+    public int AcquireCalls { get; private set; }
+
+    /// <summary>能否借出像素视图；<c>false</c> 表示"既不知道、也导不出"的后端。</summary>
+    public bool CanAcquirePixels { get; set; } = true;
+
     public string Name => _name;
 
     public Version Version => new(0, 1, 0);
@@ -286,9 +301,23 @@ internal class FakeBackend : IImageBackend
 
     public bool TryAcquirePixels(IFrame frame, out PixelLease lease)
     {
+        AcquireCalls++;
+        if (!CanAcquirePixels)
+        {
+            lease = default;
+            return false;
+        }
+
         var target = (FakeFrame)frame;
         lease = new PixelLease(target.Pixels, target.Stride);
         return true;
+    }
+
+    public bool TryGetTransparency(IFrame frame, out bool hasTransparency)
+    {
+        TransparencyQueries++;
+        hasTransparency = TransparencyAnswer ?? false;
+        return TransparencyAnswer is not null;
     }
 
     public virtual void Dispose()

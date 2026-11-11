@@ -51,24 +51,25 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 | **原生句柄** | OpenCV 后端可拿底层 `Mat`：`SharedMat()` 共享、`SubMat()` 取 ROI 视图、`CloneMat()` 深拷贝（**内部是 BGRA**，见下文边界说明） |
 | **检测流水线** | letterbox + 坐标反算、NCHW/NHWC 张量化、池化缓冲、NMS、检测框与标签绘制 |
 | **加载** | `Load(path)` 走只读内存映射，不再 `File.ReadAllBytes` 出等长数组；文件长度在映射前就校验 |
+| **半透明检测** | 加载时顺手查一次"图里真有半透明像素吗"（`HasTransparency`）；可关掉、也可自己按需重算；已知不透明时 JPEG / BMP 编码省掉合成背景 |
 | **异步** | 加载 / 保存 / 编码有 `Async` 版本；绘制保持同步（微秒级，包一层 Task 只会更慢） |
 | **AOT** | 核心与软后端声明 `IsAotCompatible`，无反射、无动态代码生成 |
 
 ## 安装
 
-七个包都已发布到 [nuget.org](https://www.nuget.org/packages/Sevencat.ImageFacade)，当前版本 `0.2.0`。
+七个包都已发布到 [nuget.org](https://www.nuget.org/packages/Sevencat.ImageFacade)，当前版本 `0.3.0`。
 
 ```xml
 <!-- 核心包永远要引，再按需加一个后端 -->
-<PackageReference Include="Sevencat.ImageFacade" Version="0.2.0" />
-<PackageReference Include="Sevencat.ImageFacade.SkiaSharp" Version="0.2.0" />
+<PackageReference Include="Sevencat.ImageFacade" Version="0.3.0" />
+<PackageReference Include="Sevencat.ImageFacade.SkiaSharp" Version="0.3.0" />
 ```
 
 后端包已带上对应三方库的依赖，不需要重复声明 `SkiaSharp` / `OpenCvSharp4` / `SixLabors.ImageSharp`。
 
 ### 版本与兼容
 
-**每个包独立发版**，不搞"七个包同进同退"：
+**每个包独立发版**，不强制"七个包同进同退"（`0.3.0` 是当前七个包统一的基线，此前的软后端曾单独走 `0.1.x`）：
 
 | 包 | 版本线 |
 |---|---|
@@ -81,7 +82,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 2. **核心前向兼容时，后端不用重发**：核心只做"加 API / 修 bug"的兼容改动时，把它升到更高的 `X.Y.Z+n`，现有后端包照常工作；只有核心做了不兼容改动（升主版本）才需要后端重新发版对齐。
 3. **只升后端也安全**：后端只用到核心的旧 API，升级某个后端不会连累核心。
 
-各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.2.0"` 是下一个统一基线的取值。
+各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.3.0"` 是当前统一基线的取值。
 
 | 包 | 后端类 | 三方库 | 说明 |
 |---|---|---|---|
@@ -466,6 +467,27 @@ using var image = engine.Load(httpStream, new LoadOptions { MaxEncodedBytes = 8 
   内存都已经分配过了，拦不住也没有意义。
 - 与 `MaxPixels` 是**两个独立维度**，各自挡一类输入，互不影响。
 
+### 半透明像素（`HasTransparency`）
+
+`Metadata.HasAlpha` 只是解码器声明的**通道能力位**——不透明 PNG 同样带 alpha 通道。要知道"图里到底有没有
+alpha < 255 的像素"，看 `Metadata.HasTransparency`（`bool?`，`null` = 不知道）：
+
+```csharp
+using var image = engine.Load(bytes);                  // 加载时顺手查一次（默认开）
+bool? translucent = image.Metadata.HasTransparency;
+
+// 关掉自动检测：省掉那一次全图扫描，代价是加载后为 null
+using var lazy = engine.Load(bytes, new LoadOptions { DetectTransparency = false });
+
+// 之后自己按需重算：有结论直接返回，force: true 无视缓存重扫
+bool? now = lazy.DetectTransparency();
+```
+
+- 三态：`true` 有半透明像素、`false` 确定全不透明、`null` 不知道。**`null` 不是 `false`**，两个方向的判断都要留兜底分支。
+- 没有 alpha 通道的输入（JPEG）加载时直接定 `false`，一个字节都不扫。
+- 绘制、缩放、裁剪之后结论会**失效**（置回 `null`）；`Clear(color)` 直接等于 `color.A < 255`。需要时再调 `DetectTransparency()`。
+- 检测怎么走、慢不慢、有哪些坑，见文末 [半透明像素：判断依据、性能与注意事项](#半透明像素判断依据性能与注意事项)。
+
 ## 出错时
 
 | 情况 | 异常 |
@@ -528,6 +550,99 @@ tests/                             # 一后端一测试工程，共享测试源�
 samples/ImageFacade.Samples/       # 示例 + README 截图生成器
 docs/images/                       # 截图
 ```
+
+## 半透明像素：判断依据、性能与注意事项
+
+"这张图带不带 alpha 通道"和"这张图里到底有没有半透明像素"是两件事，混用会得到方向相反的错：
+
+| | 含义 | 例子 |
+|---|---|---|
+| `Metadata.HasAlpha` | 解码器声明的**通道能力位** | 不透明 PNG（RGBA，但 α 全是 255）为 `true` |
+| `Metadata.HasTransparency` | 图里**真的**存在 α < 255 的像素 | 同一张图是 `false` |
+
+决定"能不能直接按不透明编码""要不要先把图合成到背景色"的，永远是后者。
+
+### 结论从哪来
+
+`AlphaProbe.TryDetect` 按顺序试两条路，都不通就返回 `null`，**绝不猜**：
+
+1. **问后端**（`IImageBackend.TryGetTransparency`，默认接口方法返回 `false`）。四个内置后端都在自己已经持有的缓冲上
+   零拷贝扫一遍，门面一个像素都不用搬：
+
+   | 后端 | 怎么答 | 答不上来的条件 |
+   |---|---|---|
+   | Skia | `SKBitmap.GetPixels()` 直接读 premultiplied 像素的 alpha 字节 | 位图不是 `Rgba8888` / 像素指针为空 |
+   | ImageSharp | `DangerousTryGetSinglePixelMemory` 扫 `Rgba32` | 像素被拆成多段内存（罕见） |
+   | OpenCV | `Mat.Data` + `Step()` 按行扫 | `Mat` 不是 `CV_8UC4` |
+   | 软后端 | `Canvas.IsFullyOpaque()` | — |
+
+   答不上来就落到第 2 条，结果一样对，只是慢一点。
+2. **借像素视图**（`TryAcquirePixels`）：ImageSharp / OpenCV 是零拷贝，Skia / 软后端会拷一份整图再扫——
+   所以那两个后端才自己去实现第 1 条，正常走不到这里。
+
+加载收尾（`ImageEngine.FinishLoad`）在 `LoadOptions.DetectTransparency`（默认 `true`）打开时调一次；
+`HasAlpha == false` 的输入直接定 `false`，连后端都不问——这就是"平台已经做好了，什么都不用做"的那种情形。
+之后由 `FacadeImage.DetectTransparency(bool force = false)` 按需重算：有结论直接返回，`force: true` 无视缓存。
+
+### 结论什么时候失效
+
+| 操作 | `HasTransparency` 变成 | 为什么 |
+|---|---|---|
+| `Load`（检测开） | `true` / `false` | 解码后扫一次 |
+| `Load`（`DetectTransparency = false`） | `null` | 没查 |
+| `Create(background)` | 背景色 `A < 255` | 来源已知 |
+| `FromPixels(...)` | `null` | 你看得见的字节，门面不替你假设 |
+| `Clear(color)` | `color.A < 255` | 整张图一个颜色 |
+| 任意绘制（点 / 线 / 矩形 / 文字 / 贴图…） | `null` | 可能刚画进去半透明颜色或抗锯齿边 |
+| `Resize` 的 `Stretch` | 原值 | 重采样权重和为 1，既不凭空产生也不消掉 alpha |
+| `Resize` 的 `Pad` / `BoxPad` / `Crop` | 原值 `false` 且**真的补了**半透明边 → `true`，否则原值 | 只有补边能引入透明像素 |
+
+绘制本身**不**顺手扫全图：一次 `DrawLine` 多花 0.3 ms 是不能接受的，这笔账留给真正需要答案的那次调用。
+读到 `null` 时可以不管（它本身就是有效答案），也可以调一次 `DetectTransparency()`。
+
+### 性能影响
+
+量级参考（单核、顺序访存、x64；用来判断"要不要在意"，不是基准报告）：
+
+| 场景 | 额外开销 |
+|---|---|
+| 后端直接回答（四个内置后端的常态） | 一遍全图**只读**扫描、零分配；1080p ≈ 0.2–0.4 ms，4K ≈ 1–1.5 ms |
+| 退到 `TryAcquirePixels` 且该后端零拷贝（ImageSharp / OpenCV） | 同上，多一次 span 的借还，可忽略 |
+| 退到 `TryAcquirePixels` 且该后端要拷贝（Skia / 软后端，正常不会发生） | 一次整图拷贝 + 扫描，1080p ≈ 1–2 ms 和一次 8 MB 分配 |
+| 无 alpha 通道的输入（JPEG、BMP；Skia / OpenCV / 软后端还能识别三通道 PNG） | 0，连后端都不问 |
+| 已知全不透明时的 JPEG / BMP 编码 | **省掉**"新建合成帧 + 整图拷贝 + 逐像素合成"，1080p ≈ 数 ms 加一次 8 MB 缓冲租借 |
+| `DetectTransparency(force: true)` | 同第一行，每次调用都重扫 |
+
+参照系：1080p 解码本身在毫秒到十几毫秒，一次扫描是它的几个百分点；扫描是纯读，比一次同尺寸 `memcpy` 还便宜
+（不用写、不用分配）。而 JPEG / BMP 编码那边省下来的是"拷贝 + 混合 + 分配"，通常比扫描本身更贵。
+
+**什么时候值得关掉**：
+
+- 只读尺寸 / 元数据、批量出缩略图的流水线（图马上被缩放或丢弃，答案没人看）；
+- 服务端处理 4K 以上的大图，每张多 1 ms 攒起来能看见；
+- 明确知道输入全不透明（相机 JPEG、屏幕截图、自己刚合成过的图）。
+
+关掉后唯一的**功能**代价是 JPEG / BMP 编码省不掉"合成背景色"那一段：输出字节完全一样，只是慢了；
+其它行为不受影响（`null` 是合法状态，谁都不会把它当 `false` 用）。
+
+### 注意事项
+
+1. **三态，别当布尔用**。`null` 不是 `false`：`== true`（确定有透明）和 `== false`（确定全不透明）是两个独立结论，
+   写成 `if (HasTransparency != false)` 会把"不知道"归到"有透明"那一类。
+2. **别用 `HasAlpha` 顶替**。带通道的图绝大多数是全不透明的；反过来 `HasAlpha == false` 时 `HasTransparency`
+   必定为 `false`（加载期直接短路，手动重算也只会得到 `false`）。
+3. **缓存会跨操作失效**。别把加载时读到的 `bool` 存起来、隔几次绘制再用——那时它已经是 `null` 或别的值了。
+4. **`force: true` 每次都全图重扫**，包括后端那条零拷贝路径。不要放进循环、不要每次 `Save` 前都调：
+   编码前的 `AssumeOpaque` 会自动用上缓存，不需要你催。
+5. **探测不出来会反复试**。后端既答不上来、`TryAcquirePixels` 也不可用（自定义后端没实现，或你根本关掉了像素访问）时，
+   `DetectTransparency()` 返回 `null` 且**不写缓存**，每次调用都要重试一遍；高频路径上请自己缓存结果或直接关掉检测。
+6. **手动改像素门面不知道**。`AcquirePixels()` 写回、`SharedMat()` 直接改 `Mat`，都不会让结论失效；
+   用这类后门改完图，先 `DetectTransparency(force: true)` 再拿结论。
+7. **`FacadeImage` 不是线程安全的**。`DetectTransparency` 会写 `ImageMetadata`，同一张图别并发调用；
+   多线程各处理一张用 `Fork` 出来的副本。
+8. **和 EXIF 方向无关**。旋转 / 翻转不改变"是否存在 α < 255 的像素"，`AutoOrient` 开与不开结论一致。
+9. **探测本身无副作用**。不改像素、不改 `IsZeroCopy`、不留引用：`TryAcquirePixels` 借来的 lease 扫完就还，
+   也不影响"零拷贝 / 共享内存"那条链路的语义。
 
 ## 文档
 

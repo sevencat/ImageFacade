@@ -234,6 +234,39 @@ public sealed class OpenCvBackendTests
     }
 
     [Fact]
+    public void Load_Reports_Transparency_And_Alpha_Channel()
+    {
+        using var engine = CreateEngine();
+
+        using (FacadeImage transparent = engine.Create(8, 8, null))
+        {
+            byte[] png = transparent.Encode(new SaveOptions { Format = ImageFormat.Png });
+            using FacadeImage loaded = engine.Load(png);
+
+            Assert.True(loaded.Metadata.HasAlpha);
+            Assert.True(loaded.Metadata.HasTransparency);
+        }
+
+        using (FacadeImage opaque = engine.Create(8, 8, Rgba32.White))
+        {
+            byte[] png = opaque.Encode(new SaveOptions { Format = ImageFormat.Png });
+            using FacadeImage loaded = engine.Load(png);
+
+            Assert.False(loaded.Metadata.HasTransparency);
+        }
+
+        using (FacadeImage opaque = engine.Create(8, 8, Rgba32.White))
+        {
+            // JPEG 一定没有 alpha 通道：结论直接定死，不用扫像素
+            byte[] jpeg = opaque.Encode(new SaveOptions { Format = ImageFormat.Jpeg });
+            using FacadeImage loaded = engine.Load(jpeg);
+
+            Assert.False(loaded.Metadata.HasAlpha);
+            Assert.False(loaded.Metadata.HasTransparency);
+        }
+    }
+
+    [Fact]
     public void Load_SixteenBit_Png_Is_Normalized_To_EightBit()
     {
         using var engine = CreateEngine();

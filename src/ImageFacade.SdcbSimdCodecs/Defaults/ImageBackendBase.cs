@@ -17,7 +17,7 @@ namespace ImageFacade.Backends;
 /// <remarks>
 /// <para>
 /// 所有后端共用的编解码语义都在这里，派生类只需要给出"帧"（<see cref="Create"/>）、
-/// 像素读写（<see cref="TryCopyPixels"/> / <see cref="ImportPixels"/>）与绘制能力（默认全部不支持）。
+/// 像素读写（<see cref="TryCopyPixels(IFrame, Span{byte}, int)"/> / <see cref="ImportPixels"/>）与绘制能力（默认全部不支持）。
 /// </para>
 /// <para>
 /// 本程序集<b>不自带任何编解码器</b>：使用方按需引一个 <c>Sdcb.SimdCodecs.Xxx</c> 包
@@ -112,9 +112,30 @@ public abstract class ImageBackendBase : IImageBackend
 
     public abstract bool TryCopyPixels(IFrame frame, Span<byte> destination, int destinationStride);
 
+    /// <summary>
+    /// 带 alpha 提示的导出：<paramref name="assumeOpaque"/> 为 <c>true</c> 时调用方**保证**整图 alpha 全是 255。
+    /// </summary>
+    /// <remarks>
+    /// 默认实现直接忽略这个提示（多一次探测，结果一定正确）；能省掉"顺手判一下有没有透明"的实现
+    /// 才覆盖它（软后端会把提示转给 <c>Canvas.CopyToStraight</c>，省掉那次全图扫描）。
+    /// 提示只有 <see cref="EncodeRequest.AssumeOpaque"/> 一个来源，其他地方一律传 <c>null</c>。
+    /// </remarks>
+    public virtual bool TryCopyPixels(IFrame frame, Span<byte> destination, int destinationStride, bool? assumeOpaque)
+        => TryCopyPixels(frame, destination, destinationStride);
+
     public abstract void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride);
 
     // ---- 默认不支持，按需覆盖 ----
+
+    /// <summary>
+    /// 默认：不表态（<see cref="IImageBackend.TryGetTransparency"/> 的默认实现返回 false，让门面自己扫像素）。
+    /// 能直接看自己帧内存的后端覆盖它，省掉门面那次导出（软后端就是 <c>Canvas.IsFullyOpaque()</c>）。
+    /// </summary>
+    public virtual bool TryGetTransparency(IFrame frame, out bool hasTransparency)
+    {
+        hasTransparency = false;
+        return false;
+    }
 
     public virtual bool TryWrapPixels(IntPtr pixels, int width, int height, int stride, bool ownsMemory, out IFrame frame)
     {
@@ -235,7 +256,9 @@ public abstract class ImageBackendBase : IImageBackend
         try
         {
             Span<byte> straight = pixels.AsSpan(0, stride * height);
-            if (!TryCopyPixels(frame, straight, stride))
+
+            // 门面查过 alpha 且确定全不透明时，把提示带下来，省掉对齐像素时的那次全图探测
+            if (!TryCopyPixels(frame, straight, stride, request.AssumeOpaque))
             {
                 throw new ImageBackendException(Name, "导出像素失败，无法编码。");
             }

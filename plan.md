@@ -2,7 +2,7 @@
 
 一句话：**一套 API，七个包**（轻量核心 `ImageFacade` + 纯托管 `ImageFacade.SdcbSimdCodecs` + `SkiaSharp` 4、`OpenCvSharp` 4/5、`ImageSharp` 2/3 五个适配包），覆盖加载 / 保存 / Resize / 画点 / 画线 / 画文字，外加 letterbox、张量化、NMS、检测框绘制。后端缺的能力直接抛 `FeatureNotSupportedException`，调用方换后端即可，上层代码一个字都不用改。
 
-> **分发形态**：本仓库的 7 个 `src` 工程**打包并发布到 NuGet**，同版本号（当前 `0.2.0`）。第三方库（SkiaSharp / OpenCvSharp / ImageSharp / Sdcb）一律 `PackageReference`，**不打包、不转发其二进制或源码**（ImgProcSharp 例外，它是源码复制进 `ImageFacade.SdcbSimdCodecs`，见 misc §Q/§Y）。`tests` / `samples` / `benchmarks` 不打包。
+> **分发形态**：本仓库的 7 个 `src` 工程**打包并发布到 NuGet**，同版本号（当前 `0.3.0`）。第三方库（SkiaSharp / OpenCvSharp / ImageSharp / Sdcb）一律 `PackageReference`，**不打包、不转发其二进制或源码**（ImgProcSharp 例外，它是源码复制进 `ImageFacade.SdcbSimdCodecs`，见 misc §Q/§Y）。`tests` / `samples` / `benchmarks` 不打包。
 
 > 本文只放设计与计划。命名取舍、许可证、逐 API 映射、各库的坑、被否决的方案全部在 [`misc.md`](misc.md)。
 
@@ -1281,7 +1281,7 @@ f:/code/ImageFacade/
 
 ## 11. 打包与发布检查单
 
-1. **每包独立版本**（各 csproj 的 `<Version>`；`Directory.Build.props` 的 `VersionPrefix` 只是兜底），当前核心与四个 net8/net10 后端为 `0.2.0`、软后端为 `0.1.1`；`PackageLicenseExpression=Apache-2.0`；`tests` / `samples` / `benchmarks` 各自 `IsPackable=false`，不产出包。
+1. **每包独立版本**（各 csproj 的 `<Version>`；`Directory.Build.props` 的 `VersionPrefix` 只是兜底），当前七个包统一为 `0.3.0`（软后端自 `0.3.0` 起并入统一基线，此前为独立的 `0.1.x`）；`PackageLicenseExpression=Apache-2.0`；`tests` / `samples` / `benchmarks` 各自 `IsPackable=false`，不产出包。
 2. 包 ID = `Sevencat.` + 工程名：`Sevencat.ImageFacade`、`Sevencat.ImageFacade.SdcbSimdCodecs`、`Sevencat.ImageFacade.SkiaSharp`、`Sevencat.ImageFacade.OpenCvSharp`、`Sevencat.ImageFacade.OpenCvSharp5`、`Sevencat.ImageFacade.ImageSharp`、`Sevencat.ImageFacade.ImageSharp2`。程序集名与命名空间不带前缀。
 3. `ImageFacade` 包内：`net8.0` + `net10.0` 两份 dll/xml（字体已作为 `EmbeddedResource` 编进 dll）+ `README.md` + `THIRD-PARTY-NOTICES.txt` + `licenses/`，无任何编解码依赖。
 4. `ImageFacade.SdcbSimdCodecs` 包内另有复制源码编出的类型，依赖 `Sdcb.SimdCodecs` 2.0 系列；**只有 `net10.0` 资产**。

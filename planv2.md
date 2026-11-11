@@ -673,3 +673,38 @@ hasAlpha true / 带 ICC → `Resize(4,3)` 后宽高、alpha、方向、格式、
 `Load_FilePath_Decodes_Real_Image_And_Releases_The_Handle`（Skia 真 PNG：映射内存直接解码 + 解完能删文件）；
 软后端另有 `Load_From_Path_Maps_File_And_Releases_It` / `LoadAsync_From_Path_Maps_File_And_Releases_It`（PNG 往返 + 句柄释放）。
 测试数 280 → **287**。
+
+### 10.8 "图里有没有半透明像素"：加载时查一次，之后按需重算
+
+`Metadata.HasAlpha` 只是**解码器声明的通道能力位**：带 alpha 通道不等于真的有半透明像素（不透明 PNG 到处是），
+而"要不要先把图合成到背景色再交给 JPEG"这类决定要的正是后者。补上 `ImageMetadata.HasTransparency`（`bool?`，`null` = 不知道）：
+
+- **加载时查一次**：`ImageEngine.FinishLoad` 在解码完成、`ImageMetadata` 已就位后调一次检测；
+  `LoadOptions.DetectTransparency`（默认 `true`）关掉就留 `null`。`HasAlpha == false` 时直接定死 `false`，一个字节都不扫。
+- **用户自己再查**：`FacadeImage.DetectTransparency(bool force = false)`——有结论直接返回，`force: true` 无视缓存重算。
+  平台/后端本来就知道答案的话，这次调用只是转个手（`IImageBackend.TryGetTransparency`，默认接口方法返回 `false`），
+  不额外做事。
+- **三条取答案的路**：后端直接答（四个后端都能在自己已经持有的缓冲上零拷贝扫一遍）→ 不行就 `TryAcquirePixels`
+  拷一次再扫 → 都不行返回 `null`。**绝不猜**：给 `null` 比给一个错的 `false` 安全。
+- **扫描本身**（`Internal/AlphaProbe.Scan`）：按行 `MemoryMarshal.Cast<byte, uint>`，一次比 4 字节判 alpha，
+  支持任意 `stride`；1080p 约 0.3 ms，零分配。
+- **结论的失效与静态推导**：绘制（`DrawLine` / `FillRectangle` / 文字…）之后置 `null`——半透明像素可能刚被画进去；
+  `Clear(color)` 直接等于 `color.A < 255`；Resize 的 `Pad` / `BoxPad` / `Crop` 补边用不透明色时可以推出 `false`，
+  `Stretch` 原样继承；`Create(background)` 按背景色定（`null` 背景 = 可能透明）。
+- **顺带省功**：已知全不透明时，`PrepareForEncode` 跳过 JPEG / BMP"合成到背景色"整段工作（新帧、拷像素、逐像素混合），
+  用 `EncodeRequest.AssumeOpaque` 把结论传给后端；软后端 `CopyToStraight(..., assumeOpaque)` 据此跳过反预乘前的 alpha 探测。
+- **各后端零拷贝**：Skia `SKBitmap.GetPixels()`、ImageSharp `DangerousTryGetSinglePixelMemory`、OpenCV `CV_8UC4` 的
+  `Mat.Data` + `Step()`、软后端 `Canvas.IsFullyOpaque()`。
+- **顺手把 `HasAlpha` 修准**（以前只有软后端填）：Skia 用 `codec.Info.AlphaType != Opaque`；OpenCV 看补通道之前的
+  `Channels() is 2 or 4`；ImageSharp 一律解码成 `Rgba32`，从像素类型上看不出源文件通道数，只认死 JPEG，
+  其它按"可能有"处理（多扫一遍，也不给错答案）。
+
+**用例**：核心 `TransparencyTests` 11 个（加载查一次并缓存、`DetectTransparency = false` 留 `null`、无通道格式不打扰后端、
+后端能答就不扫像素、后端既不答也导不出像素时 `null`、绘制后失活再重算、`Clear` 直接定论、Pad 推导、`AssumeOpaque` 传递、
+`Scan` 的 stride 越界）；
+Skia `Load_Reports_Transparency_From_Real_Bitmap` / `Load_Reports_Opaque_When_All_Pixels_Are_255`；
+软后端 `Load_Reports_Transparency_From_Canvas`；ImageSharp `Load_Reports_Transparency`、OpenCV `Load_Reports_Transparency_And_Alpha_Channel`
+（这两份源码各被两个主版本工程编译一遍）。测试数 287 → **305**。
+
+面向使用者的版本（三层结论的语义、失效时机表、性能量级、9 条注意事项）写在
+README 的「半透明像素：判断依据、性能与注意事项」一节，这里只留实现视角的记录。

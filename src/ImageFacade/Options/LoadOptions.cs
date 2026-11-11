@@ -46,4 +46,21 @@ public sealed class LoadOptions
     /// </para>
     /// </remarks>
     public long MaxEncodedBytes { get; init; }
+
+    /// <summary>
+    /// 加载时检查一次"图里是否真的存在半透明像素"，结果放进 <see cref="ImageMetadata.HasTransparency"/>。默认 <c>true</c>。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 这一次检查的用处：编码 / 保存到不支持 alpha 的格式（JPEG、BMP）时，若已知全不透明就能整段跳过
+    /// "合成背景色"的全图处理；软后端导出时也能跳过逐像素反预乘（<c>Canvas.CopyToStraight</c> 的自动探测）。
+    /// 代价是一次全图扫描（1080p 约 0.3 ms，纯内存带宽），只关心解码速度、从不编码的调用方可以关掉它，
+    /// 关掉后 <see cref="ImageMetadata.HasTransparency"/> 就是 <c>null</c>（未知）。
+    /// </para>
+    /// <para>
+    /// 后端自己能直接回答时不扫描（<see cref="Backends.IImageBackend.TryGetTransparency"/>）；
+    /// 后端有 alpha 通道但无法回答时才由门面扫像素。没有 alpha 通道的格式（JPEG / BMP）直接得出 <c>false</c>。
+    /// </para>
+    /// </remarks>
+    public bool DetectTransparency { get; init; } = true;
 }

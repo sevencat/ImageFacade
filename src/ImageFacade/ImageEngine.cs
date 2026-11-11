@@ -134,7 +134,31 @@ public sealed class ImageEngine : IDisposable
 
         // 第二道闸：嗅探不认识的格式（或头部与实际不符）在这里兜底，超限的帧就地释放
         EnsureWithinLimit(frame, load.MaxPixels);
-        return new FacadeImage(this, Backend, frame, metadata);
+        return FinishLoad(new FacadeImage(this, Backend, frame, metadata), load);
+    }
+
+    /// <summary>
+    /// 加载收尾：按 <see cref="LoadOptions.DetectTransparency"/> 检查一次"有没有半透明像素"。
+    /// 后端能直接回答就问它（<see cref="Backends.IImageBackend.TryGetTransparency"/>），问不到才扫像素；
+    /// 两样都不行就留 <c>null</c>（未知）——检查不出来不该让加载失败。
+    /// </summary>
+    private static FacadeImage FinishLoad(FacadeImage image, LoadOptions load)
+    {
+        if (!load.DetectTransparency)
+        {
+            return image;
+        }
+
+        // 解码器说这张图连 alpha 通道都没有（JPEG / BMP / 三通道 PNG）：半透明像素不可能存在，
+        // 结论直接定死，连后端都不用问——这也是最便宜的"平台已经做好了"。
+        if (!image.Metadata.HasAlpha)
+        {
+            image.SetHasTransparency(false);
+            return image;
+        }
+
+        image.DetectTransparency();
+        return image;
     }
 
     // ---- 异步加载（I/O 真异步；解码走后端异步接口，否则 Task.Run） ----
@@ -247,7 +271,7 @@ public sealed class ImageEngine : IDisposable
         }
 
         EnsureWithinLimit(decoded.Frame, load.MaxPixels);
-        return new FacadeImage(this, Backend, decoded.Frame, decoded.Metadata);
+        return FinishLoad(new FacadeImage(this, Backend, decoded.Frame, decoded.Metadata), load);
 
         DecodedImage DecodeLocally()
         {
@@ -264,12 +288,16 @@ public sealed class ImageEngine : IDisposable
         ValidateSize(width, height);
 
         IFrame frame = Backend.Create(width, height, background);
+
+        // 整张图都是同一个颜色：有没有透明像素是由这个颜色直接决定的，不需要扫
+        bool translucent = background is null || background.Value.A < 255;
         var metadata = new ImageMetadata(
             ImageFormat.Unknown,
             width,
             height,
             orientation: 0,
-            hasAlpha: background is null || background.Value.A < 255);
+            hasAlpha: translucent,
+            hasTransparency: translucent);
 
         return new FacadeImage(this, Backend, frame, metadata);
     }

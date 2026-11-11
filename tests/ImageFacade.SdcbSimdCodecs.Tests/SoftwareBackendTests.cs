@@ -61,6 +61,26 @@ public sealed class SoftwareBackendTests
     }
 
     [Fact]
+    public void Load_Reports_Transparency_From_Canvas()
+    {
+        using var engine = CreateEngine();
+
+        using (FacadeImage transparent = engine.Create(8, 8, null))
+        {
+            byte[] png = transparent.Encode(new SaveOptions { Format = ImageFormat.Png });
+            using FacadeImage loaded = engine.Load(png);
+            Assert.True(loaded.Metadata.HasTransparency);
+        }
+
+        using (FacadeImage opaque = engine.Create(8, 8, Rgba32.White))
+        {
+            byte[] png = opaque.Encode(new SaveOptions { Format = ImageFormat.Png });
+            using FacadeImage loaded = engine.Load(png);
+            Assert.False(loaded.Metadata.HasTransparency);
+        }
+    }
+
+    [Fact]
     public void SemiTransparent_Clear_Keeps_Alpha()
     {
         using var engine = CreateEngine();

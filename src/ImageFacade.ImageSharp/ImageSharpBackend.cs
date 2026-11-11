@@ -127,7 +127,10 @@ public sealed class ImageSharpBackend : IImageBackend
             image.Mutate(static context => context.AutoOrient());
         }
 
-        metadata = new ImageMetadata(format, image.Width, image.Height, orientation);
+        // 源文件是否可能带 alpha 通道（JPEG 一定没有；其余按"可能有"，让门面扫像素定论）
+        bool hasAlpha = DecodedHasAlpha(format);
+
+        metadata = new ImageMetadata(format, image.Width, image.Height, orientation, hasAlpha);
         return new ImageSharpFrame(image);
     }
 
@@ -515,6 +518,31 @@ public sealed class ImageSharpBackend : IImageBackend
         return true;
     }
 
+    /// <summary>
+    /// 直接看 ImageSharp 自己的像素（<see cref="SixPixel"/>，本来就是不预乘的 RGBA），不导出、不转换。
+    /// </summary>
+    public bool TryGetTransparency(IFrame frame, out bool hasTransparency)
+    {
+        hasTransparency = false;
+
+        SixImage image = ((ImageSharpFrame)frame).Image;
+        if (!image.DangerousTryGetSinglePixelMemory(out Memory<SixPixel> memory))
+        {
+            return false;   // 多段内存：不猜，交给门面走 TryAcquirePixels 扫
+        }
+
+        foreach (SixPixel pixel in memory.Span)
+        {
+            if (pixel.A != 255)
+            {
+                hasTransparency = true;
+                break;
+            }
+        }
+
+        return true;
+    }
+
     public void Dispose()
     {
         // FontFamily / Font 由 FontCollection 内部持有，不需要显式释放
@@ -739,6 +767,13 @@ public sealed class ImageSharpBackend : IImageBackend
         "TIFF" => ImageFormat.Tiff,
         _ => ImageFormat.Unknown,
     };
+
+    /// <summary>
+    /// 源数据是否**可能**带 alpha 通道：ImageSharp 一律解码成 <c>Rgba32</c>，从像素类型上看不出
+    /// 源文件有几个通道，所以只认死"绝对没有 alpha"的 JPEG。其它格式一律按"可能有"处理，
+    /// 由门面扫一遍像素得出准确结论——零拷贝，宁可多扫也不给错答案。
+    /// </summary>
+    private static bool DecodedHasAlpha(ImageFormat format) => format != ImageFormat.Jpeg;
 
     private static int ReadOrientation(SixImage image)
     {

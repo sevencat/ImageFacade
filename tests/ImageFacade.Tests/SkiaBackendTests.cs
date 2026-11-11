@@ -195,6 +195,31 @@ public sealed class SkiaBackendTests
     }
 
     [Fact]
+    public void Load_Reports_Transparency_From_Real_Bitmap()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(16, 16, null);
+
+        byte[] png = image.Encode(new SaveOptions { Format = ImageFormat.Png });
+        using FacadeImage loaded = engine.Load(png);
+
+        Assert.True(loaded.Metadata.HasAlpha);
+        Assert.True(loaded.Metadata.HasTransparency);
+    }
+
+    [Fact]
+    public void Load_Reports_Opaque_When_All_Pixels_Are_255()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(16, 16, Rgba32.White);
+
+        byte[] png = image.Encode(new SaveOptions { Format = ImageFormat.Png });
+        using FacadeImage loaded = engine.Load(png);
+
+        Assert.False(loaded.Metadata.HasTransparency);
+    }
+
+    [Fact]
     public void CopyPixels_Bgra_Swaps_Channels()
     {
         using var engine = CreateEngine();

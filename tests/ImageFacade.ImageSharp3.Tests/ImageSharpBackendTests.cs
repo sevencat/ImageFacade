@@ -40,6 +40,37 @@ public sealed class ImageSharpBackendTests
         }
     }
 
+    [Fact]
+    public void Load_Reports_Transparency()
+    {
+        using var engine = CreateEngine();
+
+        using (FacadeImage transparent = engine.Create(8, 8, null))
+        {
+            byte[] png = transparent.Encode(new SaveOptions { Format = ImageFormat.Png });
+            using FacadeImage loaded = engine.Load(png);
+
+            Assert.True(loaded.Metadata.HasTransparency);
+        }
+
+        using (FacadeImage opaque = engine.Create(8, 8, Rgba32.White))
+        {
+            byte[] png = opaque.Encode(new SaveOptions { Format = ImageFormat.Png });
+            using FacadeImage loaded = engine.Load(png);
+
+            Assert.False(loaded.Metadata.HasTransparency);
+        }
+
+        using (FacadeImage opaque = engine.Create(8, 8, Rgba32.White))
+        {
+            byte[] jpeg = opaque.Encode(new SaveOptions { Format = ImageFormat.Jpeg });
+            using FacadeImage loaded = engine.Load(jpeg);
+
+            Assert.False(loaded.Metadata.HasAlpha);
+            Assert.False(loaded.Metadata.HasTransparency);
+        }
+    }
+
     private static int CountInk(FacadeImage image)
     {
         byte[] pixels = image.CopyPixels();

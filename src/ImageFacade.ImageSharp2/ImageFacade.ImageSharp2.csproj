@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- 独立版本线：后端包各自发版，不跟随核心（见 README「版本与兼容」） -->
-    <Version>0.2.0</Version>
+    <Version>0.3.0</Version>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade.ImageSharp2</AssemblyName>
     <RootNamespace>ImageFacade.ImageSharp</RootNamespace>

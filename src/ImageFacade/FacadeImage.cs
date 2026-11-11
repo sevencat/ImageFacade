@@ -133,7 +133,15 @@ public sealed class FacadeImage : IDisposable
                 // 且确实有补边区域（Crop 时 Fill 出来的整块被贴图完全盖住，不产生可见的透明像素）。
                 hasAlpha: _metadata.HasAlpha || (HasPadArea(plan) && options.PadColor.A < 255),
                 // 这里只有拉伸 / 裁剪 / 补边，没有任何旋转或翻转，EXIF 方向值原样继承。
-                orientation: _metadata.Orientation);
+                orientation: _metadata.Orientation,
+                // alpha 结论按同样的逻辑推导：重采样不会凭空产生或消掉 alpha，
+                // 只有"补了半透明的边"能把全不透明的图变成有透明像素。
+                hasTransparency: _metadata.HasTransparency switch
+                {
+                    false => HasPadArea(plan) && options.PadColor.A < 255,
+                    true => true,
+                    null => null,
+                });
             return this;
         }
         finally
@@ -147,6 +155,9 @@ public sealed class FacadeImage : IDisposable
     {
         ThrowIfDisposed();
         _backend.Clear(Frame, color);
+
+        // 整张图都是同一个颜色：alpha 结论由这个颜色直接决定，不用扫
+        _metadata = _metadata.WithHasTransparency(color.A < 255);
         return this;
     }
 
@@ -420,7 +431,7 @@ public sealed class FacadeImage : IDisposable
 
         if (_backend is IAsyncImageBackend asyncBackend)
         {
-            var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata);
+            var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata, AssumeOpaque);
             EncodableFrame encodable = PrepareForEncode(save, format);
             try
             {
@@ -452,7 +463,7 @@ public sealed class FacadeImage : IDisposable
         if (_backend is IAsyncImageBackend asyncBackend)
         {
             using var buffer = new MemoryStream();
-            var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata);
+            var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata, AssumeOpaque);
             EncodableFrame encodable = PrepareForEncode(save, format);
             try
             {
@@ -475,6 +486,12 @@ public sealed class FacadeImage : IDisposable
             },
             cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// 传给后端的 alpha 提示：只有"确定全不透明"才给 <c>true</c>，其余（未知 / 有透明）一律 <c>null</c>。
+    /// 不确定就别说，后端会自己探测——宁慢不错。
+    /// </summary>
+    private bool? AssumeOpaque => _metadata.HasTransparency is false ? true : null;
 
     private static void ValidateSaveOptions(SaveOptions save)
     {
@@ -598,6 +615,45 @@ public sealed class FacadeImage : IDisposable
             : throw new FeatureNotSupportedException(nameof(AcquirePixels), _backend.Name);
     }
 
+    /// <summary>
+    /// 检查并缓存"这张图里是否真的存在 alpha &lt; 255 的像素"，结果写进
+    /// <see cref="ImageMetadata.HasTransparency"/> 并返回。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 加载时已经检查过一次（<see cref="LoadOptions.DetectTransparency"/>，默认开），所以这里通常
+    /// **什么都不用做**——直接返回缓存值；后端自己就能回答的（<see cref="IImageBackend.TryGetTransparency"/>）
+    /// 同样不会重扫。绘过图 / 改过像素之后再调用才有意义：那些操作会把缓存清成"未知"（画上去的东西
+    /// 可能带半透明或抗锯齿边），此时这里会真正扫一遍。
+    /// </para>
+    /// <para>
+    /// 返回 <c>null</c> = 后端既答不上来、也导不出像素（无法判断），不是异常。
+    /// <paramref name="force"/> 为 <c>true</c> 时无视缓存强制重扫。
+    /// </para>
+    /// </remarks>
+    public bool? DetectTransparency(bool force = false)
+    {
+        ThrowIfDisposed();
+
+        // 加载时 / 后端自己已经算过（或者刚 Clear 成全不透明）：直接返回，一次像素都不碰
+        if (!force && _metadata.HasTransparency is bool known)
+        {
+            return known;
+        }
+
+        bool? detected = AlphaProbe.TryDetect(_backend, Frame);
+        if (detected is bool value)
+        {
+            _metadata = _metadata.WithHasTransparency(value);
+        }
+
+        return detected;
+    }
+
+    /// <summary>写一个已知的 alpha 结论（加载时由解码元数据直接得出，不走探测）。</summary>
+    internal void SetHasTransparency(bool? hasTransparency)
+        => _metadata = _metadata.WithHasTransparency(hasTransparency);
+
     // ---- 路由 ----
 
     private FacadeImage Execute<TSpec>(string feature, in TSpec spec, SpecOperation<TSpec> operation)
@@ -609,6 +665,9 @@ public sealed class FacadeImage : IDisposable
             throw new FeatureNotSupportedException(feature, _backend.Name);
         }
 
+        // 画上去的东西可能带半透明颜色或抗锯齿边：旧的"全不透明"结论立刻作废。
+        // 重算交给 DetectTransparency()，不在每次绘制里扫全图（那才是真正的浪费）。
+        _metadata = _metadata.WithHasTransparency(null);
         return this;
     }
 
@@ -620,6 +679,7 @@ public sealed class FacadeImage : IDisposable
             throw new FeatureNotSupportedException(feature, _backend.Name);
         }
 
+        _metadata = _metadata.WithHasTransparency(null);   // 同 Execute：绘制会让 alpha 结论过期
         return this;
     }
 
@@ -656,7 +716,9 @@ public sealed class FacadeImage : IDisposable
             height,
             // 重采样不会凭空产生 alpha，也不会把已有 alpha 变没；纯拉伸不改 EXIF 方向。
             hasAlpha: _metadata.HasAlpha,
-            orientation: _metadata.Orientation);
+            orientation: _metadata.Orientation,
+            // 同上：全不透明的图怎么拉伸都还是全不透明（权重和为 1，255 乘出来仍是 255）
+            hasTransparency: _metadata.HasTransparency);
     }
 
     /// <summary>
@@ -701,7 +763,7 @@ public sealed class FacadeImage : IDisposable
         ValidateSaveOptions(save);
         EnsureCanEncode(format);
 
-        var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata);
+        var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata, AssumeOpaque);
         EncodableFrame encodable = PrepareForEncode(save, format);
         try
         {
@@ -736,6 +798,13 @@ public sealed class FacadeImage : IDisposable
     private EncodableFrame PrepareForEncode(SaveOptions save, ImageFormat format)
     {
         if (format.SupportsAlpha())
+        {
+            return new EncodableFrame(Frame, null);
+        }
+
+        // 已知全不透明（加载时 / DetectTransparency 检查过）：合成背景色什么都不会改，
+        // 整段"导出 → 扫 alpha → 逐像素合成 → 建临时帧"可以全部跳过。
+        if (_metadata.HasTransparency == false)
         {
             return new EncodableFrame(Frame, null);
         }
@@ -777,19 +846,8 @@ public sealed class FacadeImage : IDisposable
     {
         int width = Width;
         int height = Height;
-        bool hasTransparency = false;
 
-        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(pixels.AsSpan(0, stride * height));
-        foreach (uint word in words)
-        {
-            if ((word & 0xFF000000u) != 0xFF000000u)
-            {
-                hasTransparency = true;
-                break;
-            }
-        }
-
-        if (!hasTransparency)
+        if (!AlphaProbe.Scan(pixels, stride, width, height))
         {
             return false;
         }
@@ -846,14 +904,18 @@ public sealed class FacadeImage : IDisposable
     /// 既有的 <see cref="IFrame"/> 没有 alpha 能力位，为这个去扫全图代价太高（planv2 §9.11 第 9、21 条）。
     /// 例：纯拉伸 / 裁剪 / 补不透明边 → 继承原来的 alpha；补透明边 → 一定产生透明像素；
     /// 只有旋转/翻转才可能改变方向值，而当前没有这类操作。
+    /// <para>
+    /// <paramref name="hasTransparency"/> 同理：每次几何变换都按"会不会引入半透明像素"重新推导
+    /// （重采样不引入，补半透明边才引入），推导不出来的写 <c>null</c> —— 宁可说"不知道"，也不能留个错的 <c>false</c>。
+    /// </para>
     /// </remarks>
-    private void ReplaceFrame(IFrame frame, int width, int height, bool hasAlpha, int orientation)
+    private void ReplaceFrame(IFrame frame, int width, int height, bool hasAlpha, int orientation, bool? hasTransparency)
     {
         IFrame previous = Frame;
         _frame = frame;
         previous.Dispose();
         IsZeroCopy = false;
-        _metadata = new ImageMetadata(_metadata.Format, width, height, orientation, hasAlpha, _metadata.IccProfile);
+        _metadata = new ImageMetadata(_metadata.Format, width, height, orientation, hasAlpha, _metadata.IccProfile, hasTransparency);
     }
 
     /// <summary>缩放结果小于输出框 → 有补边区域（贴图盖不满）。</summary>

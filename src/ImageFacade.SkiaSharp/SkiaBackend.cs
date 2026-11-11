@@ -99,6 +99,10 @@ public sealed class SkiaBackend : IImageBackend
                 throw new ImageBackendException(Name, $"解码失败：{result}。");
             }
 
+            // 编码器声明的通道能力：AlphaType 为 Opaque 说明源数据里根本没有 alpha 通道
+            // （JPEG / 三通道 PNG），"图里有没有半透明像素"直接就是 false，不用再扫。
+            bool hasAlpha = codec.Info.AlphaType != SKAlphaType.Opaque;
+
             int orientation = (int)codec.EncodedOrigin;
             if (request.AutoOrient && orientation is > 1 and <= 8)
             {
@@ -111,11 +115,11 @@ public sealed class SkiaBackend : IImageBackend
                     out int rotatedWidth,
                     out int rotatedHeight);
 
-                metadata = new ImageMetadata(MapFormat(codec.EncodedFormat), rotatedWidth, rotatedHeight, orientation);
+                metadata = new ImageMetadata(MapFormat(codec.EncodedFormat), rotatedWidth, rotatedHeight, orientation, hasAlpha);
                 return Import(rotated, rotatedWidth, rotatedHeight);
             }
 
-            metadata = new ImageMetadata(MapFormat(codec.EncodedFormat), bitmap.Width, bitmap.Height, orientation);
+            metadata = new ImageMetadata(MapFormat(codec.EncodedFormat), bitmap.Width, bitmap.Height, orientation, hasAlpha);
             var frame = new SkiaFrame(bitmap);
             transferred = true;
             return frame;
@@ -486,6 +490,51 @@ public sealed class SkiaBackend : IImageBackend
 
         lease = new PixelLease(buffer, stride, () => ImportPixels(target, buffer, stride));
         return true;
+    }
+
+    /// <summary>
+    /// 直接扫位图本身（本后端统一是 <c>Rgba8888</c>，alpha 在每像素第 4 字节）：
+    /// 预乘只动 RGB、不动 alpha 的值，所以判断"有没有透明"完全不用导出 / 反预乘。
+    /// </summary>
+    public bool TryGetTransparency(IFrame frame, out bool hasTransparency)
+    {
+        hasTransparency = false;
+
+        SKBitmap bitmap = ((SkiaFrame)frame).Bitmap;
+        if (bitmap.Handle == IntPtr.Zero || bitmap.ColorType != SKColorType.Rgba8888)
+        {
+            return false;   // 别的颜色布局不猜，交给门面走 TryAcquirePixels 扫
+        }
+
+        IntPtr pixels = bitmap.GetPixels();
+        if (pixels == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        unsafe
+        {
+            hasTransparency = HasNonOpaquePixel((byte*)pixels, bitmap.RowBytes, bitmap.Width, bitmap.Height);
+        }
+
+        return true;
+    }
+
+    private static unsafe bool HasNonOpaquePixel(byte* pixels, int rowBytes, int width, int height)
+    {
+        for (int y = 0; y < height; y++)
+        {
+            byte* row = pixels + ((long)y * rowBytes);
+            for (int x = 3; x < width * 4; x += 4)
+            {
+                if (row[x] != 255)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     public void Dispose()
