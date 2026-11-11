@@ -308,4 +308,24 @@ public sealed class SoftwareBackendTests
 
         Assert.Equal(new Rgba32(10, 20, 30), image.GetPixel(0, 0));
     }
+
+    [Fact]
+    public void AcquirePixels_Double_Dispose_Does_Not_Return_Buffer_Twice()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage first = engine.Create(16, 16, Rgba32.White);
+        using FacadeImage second = engine.Create(16, 16, Rgba32.Black);
+
+        PixelLease stale = first.AcquirePixels();
+        stale.Dispose();
+        stale.Dispose();   // 旧实现会把同一数组还回池子两次，池子可能再同时发给两个人
+
+        using PixelLease a = second.AcquirePixels();
+        using PixelLease b = first.AcquirePixels();
+
+        // 两块租约必须是不同内存：写其中一个不能影响另一个
+        a.Pixels[0] = 1;
+        Assert.NotEqual((byte)1, b.Pixels[0]);
+        Assert.Equal(Rgba32.White.R, b.Pixels[0]);
+    }
 }

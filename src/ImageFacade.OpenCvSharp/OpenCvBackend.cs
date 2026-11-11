@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.Intrinsics;
 using ImageFacade.Backends;
 using GlyphLayout = ImageFacade.Text.Engine.TextLayout;
 using GlyphMask = ImageFacade.Text.Engine.GlyphMask;
@@ -528,6 +529,10 @@ public sealed class OpenCvBackend : IImageBackend
     /// RGBA32 ↔ BGRA 的通道交换（R↔B，A 直通）。交换是对合运算，导入与导出共用这一份实现。
     /// 两侧各按自己的 stride 走行，因此源/目标可以是不连续的 <c>Mat</c>，也可以是带填充的外部缓冲。
     /// </summary>
+    /// <remarks>
+    /// 每轮 <c>Vector128</c> 处理 4 个像素（一次 shuffle 换完 R/B），行尾不足 16 字节走标量。
+    /// 不做 <c>CvtColor(BGRA2RGBA)</c> 是因为那需要一块中间 Mat，多一次全图拷贝。
+    /// </remarks>
     private static unsafe void SwapRedBlue(
         byte* source,
         int sourceStride,
@@ -537,11 +542,35 @@ public sealed class OpenCvBackend : IImageBackend
         int height)
     {
         int rowBytes = width * 4;
+        bool vectorized = Vector128.IsHardwareAccelerated;
+
+        // 4 个像素的 R/B 互换：0<->2, 4<->6, 8<->10, 12<->14
+        Vector128<byte> swap = Vector128.Create(
+            (byte)2, 1, 0, 3,
+            (byte)6, 5, 4, 7,
+            (byte)10, 9, 8, 11,
+            (byte)14, 13, 12, 15);
+
         for (int y = 0; y < height; y++)
         {
             byte* row = source + (y * sourceStride);
             byte* output = destination + (y * destinationStride);
-            for (int offset = 0; offset < rowBytes; offset += 4)
+
+            int offset = 0;
+            if (vectorized)
+            {
+                ref byte s = ref *row;
+                ref byte d = ref *output;
+                for (; offset + 16 <= rowBytes; offset += 16)
+                {
+                    Vector128.StoreUnsafe(
+                        Vector128.Shuffle(Vector128.LoadUnsafe(ref s, (nuint)offset), swap),
+                        ref d,
+                        (nuint)offset);
+                }
+            }
+
+            for (; offset < rowBytes; offset += 4)
             {
                 output[offset] = row[offset + 2];
                 output[offset + 1] = row[offset + 1];

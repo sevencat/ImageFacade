@@ -71,10 +71,14 @@ public sealed class ImageEngine : IDisposable
             throw new ArgumentOutOfRangeException(nameof(LoadOptions.FrameIndex), load.FrameIndex, "v1 只处理第 0 帧。");
         }
 
+        // 第一道闸：能读到头部就在解码前拒绝，避免按声明尺寸分配一大块像素
+        CheckDeclaredDimensions(data, load.MaxPixels);
+
+        IFrame frame;
+        ImageMetadata metadata;
         try
         {
-            IFrame frame = Backend.Decode(data, new DecodeRequest(load.AutoOrient, load.FrameIndex), out ImageMetadata metadata);
-            return new FacadeImage(this, Backend, frame, metadata);
+            frame = Backend.Decode(data, new DecodeRequest(load.AutoOrient, load.FrameIndex), out metadata);
         }
         catch (FeatureNotSupportedException)
         {
@@ -89,6 +93,10 @@ public sealed class ImageEngine : IDisposable
         {
             throw new ImageBackendException(Backend.Name, "解码失败。", ex);
         }
+
+        // 第二道闸：嗅探不认识的格式（或头部与实际不符）在这里兜底，超限的帧就地释放
+        EnsureWithinLimit(frame, load.MaxPixels);
+        return new FacadeImage(this, Backend, frame, metadata);
     }
 
     // ---- 异步加载（I/O 真异步；解码走后端异步接口，否则 Task.Run） ----
@@ -141,13 +149,14 @@ public sealed class ImageEngine : IDisposable
 
         var request = new DecodeRequest(load.AutoOrient, load.FrameIndex);
 
+        CheckDeclaredDimensions(data.Span, load.MaxPixels);
+
+        DecodedImage decoded;
         try
         {
-            DecodedImage decoded = Backend is IAsyncImageBackend asyncBackend
+            decoded = Backend is IAsyncImageBackend asyncBackend
                 ? await asyncBackend.DecodeAsync(data, request, cancellationToken).ConfigureAwait(false)
                 : await AsyncBridge.Run(DecodeLocally, cancellationToken).ConfigureAwait(false);
-
-            return new FacadeImage(this, Backend, decoded.Frame, decoded.Metadata);
         }
         catch (FeatureNotSupportedException)
         {
@@ -161,6 +170,9 @@ public sealed class ImageEngine : IDisposable
         {
             throw new ImageBackendException(Backend.Name, "解码失败。", ex);
         }
+
+        EnsureWithinLimit(decoded.Frame, load.MaxPixels);
+        return new FacadeImage(this, Backend, decoded.Frame, decoded.Metadata);
 
         DecodedImage DecodeLocally()
         {
@@ -293,6 +305,38 @@ public sealed class ImageEngine : IDisposable
         {
             throw new ArgumentException($"尺寸过大：{width}x{height} 的 RGBA 缓冲超过 int.MaxValue 字节。");
         }
+    }
+
+    /// <summary>
+    /// 解码前的第一道闸：从头部读声明尺寸，超限直接拒绝（此时还没分配任何像素缓冲）。
+    /// 嗅探不到的格式静默放过，由 <see cref="EnsureWithinLimit"/> 兜底。
+    /// </summary>
+    private static void CheckDeclaredDimensions(ReadOnlySpan<byte> data, long maxPixels)
+    {
+        if (maxPixels <= 0)
+        {
+            return;
+        }
+
+        if (ImageHeaderReader.TryReadDimensions(data, out int width, out int height)
+            && (long)width * height > maxPixels)
+        {
+            throw new ImageSizeLimitExceededException(width, height, maxPixels);
+        }
+    }
+
+    /// <summary>解码后的第二道闸：超限的帧就地释放，绝不把巨型对象交给调用方。</summary>
+    private static void EnsureWithinLimit(IFrame frame, long maxPixels)
+    {
+        if (maxPixels <= 0 || (long)frame.Width * frame.Height <= maxPixels)
+        {
+            return;
+        }
+
+        int width = frame.Width;
+        int height = frame.Height;
+        frame.Dispose();
+        throw new ImageSizeLimitExceededException(width, height, maxPixels);
     }
 
     private void ThrowIfDisposed()

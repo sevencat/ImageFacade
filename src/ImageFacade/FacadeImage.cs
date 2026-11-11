@@ -69,42 +69,63 @@ public sealed class FacadeImage : IDisposable
         ImageEngine.ValidateSize(options.Width, options.Height);
 
         ResizePlan plan = ResizePlanner.Plan(Width, Height, options.Width, options.Height, options.Mode);
-        ResizeCore(plan.ScaledWidth, plan.ScaledHeight, options.Sampler);
 
-        if (!plan.NeedsComposite)
-        {
-            return this;
-        }
+        // 合成需要的两块缓冲都可能到 MB 级（1080p 缩放约 8 MB），走池避免每帧进 LOH
+        byte[] scaled = ArrayPool<byte>.Shared.Rent(checked(plan.ScaledWidth * 4 * plan.ScaledHeight));
+        byte[] output = ArrayPool<byte>.Shared.Rent(checked(plan.OutputWidth * 4 * plan.OutputHeight));
 
-        byte[] scaled = CopyCanonicalPixels(out int scaledStride);
-        int outputStride = plan.OutputWidth * 4;
-        var output = new byte[checked(outputStride * plan.OutputHeight)];
-        Fill(output, options.PadColor);
-        Blit(
-            scaled,
-            scaledStride,
-            plan.ScaledWidth,
-            plan.ScaledHeight,
-            output,
-            outputStride,
-            plan.OutputWidth,
-            plan.OutputHeight,
-            plan.PlaceX,
-            plan.PlaceY);
-
-        IFrame frame = _backend.Create(plan.OutputWidth, plan.OutputHeight, background: null);
         try
         {
-            _backend.ImportPixels(frame, output, outputStride);
-        }
-        catch
-        {
-            frame.Dispose();
-            throw;
-        }
+            int scaledStride = plan.ScaledWidth * 4;
+            int outputStride = plan.OutputWidth * 4;
 
-        ReplaceFrame(frame, plan.OutputWidth, plan.OutputHeight);
-        return this;
+            // 先缩放再合成：中间帧只在这里用一次，失败时不留下"已缩放未合成"的中间态
+            IFrame scaledFrame = ResizeFrame(plan.ScaledWidth, plan.ScaledHeight, options.Sampler);
+            try
+            {
+                if (!_backend.TryCopyPixels(scaledFrame, scaled.AsSpan(0, scaledStride * plan.ScaledHeight), scaledStride))
+                {
+                    throw new FeatureNotSupportedException(nameof(CopyPixels), _backend.Name);
+                }
+            }
+            finally
+            {
+                scaledFrame.Dispose();
+            }
+
+            Span<byte> outputSpan = output.AsSpan(0, outputStride * plan.OutputHeight);
+            Fill(outputSpan, options.PadColor);
+            Blit(
+                scaled,
+                scaledStride,
+                plan.ScaledWidth,
+                plan.ScaledHeight,
+                output,
+                outputStride,
+                plan.OutputWidth,
+                plan.OutputHeight,
+                plan.PlaceX,
+                plan.PlaceY);
+
+            IFrame frame = _backend.Create(plan.OutputWidth, plan.OutputHeight, background: null);
+            try
+            {
+                _backend.ImportPixels(frame, outputSpan, outputStride);
+            }
+            catch
+            {
+                frame.Dispose();
+                throw;
+            }
+
+            ReplaceFrame(frame, plan.OutputWidth, plan.OutputHeight);
+            return this;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(scaled);
+            ArrayPool<byte>.Shared.Return(output);
+        }
     }
 
     public FacadeImage Clear(Rgba32 color)

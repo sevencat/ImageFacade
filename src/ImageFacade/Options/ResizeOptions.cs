@@ -12,7 +12,10 @@ public enum ResizeMode
     /// <summary>等比缩放到完全放进目标框，四周用 <see cref="ResizeOptions.PadColor"/> 补齐（输出严格等于目标尺寸）。</summary>
     Pad = 2,
 
-    /// <summary>同 <see cref="Pad"/>，但先按 <c>BoxPad</c> 规则取整（补齐后仍是目标尺寸）。</summary>
+    /// <summary>
+    /// 同 <see cref="Pad"/>，但**只缩小不放大**：源图比目标框小时保持原尺寸居中补边，
+    /// 补齐后仍是目标尺寸。
+    /// </summary>
     BoxPad = 3,
 
     /// <summary>等比缩放到完全放进目标框，输出就是缩放后的尺寸（不含补边）。</summary>

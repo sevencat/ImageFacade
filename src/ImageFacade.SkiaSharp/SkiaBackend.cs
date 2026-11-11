@@ -378,7 +378,29 @@ public sealed class SkiaBackend : IImageBackend
         return true;
     }
 
+    /// <summary>
+    /// 位图（预乘）→ 直通 RGBA32。走 Skia 自己的 alpha 类型转换（<c>SkConvertPixels</c> 用倒数表 + SIMD，
+    /// 比逐像素除法快一个量级）；转换不可用时回退到标量实现。
+    /// </summary>
     private static unsafe void CopyStraight(SKBitmap bitmap, Span<byte> destination, int destinationStride)
+    {
+        using SKPixmap? source = bitmap.PeekPixels();
+        if (source is not null)
+        {
+            var info = new SKImageInfo(bitmap.Width, bitmap.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+            fixed (byte* pointer = destination)
+            {
+                if (source.ReadPixels(info, (IntPtr)pointer, destinationStride))
+                {
+                    return;
+                }
+            }
+        }
+
+        CopyStraightScalar(bitmap, destination, destinationStride);
+    }
+
+    private static unsafe void CopyStraightScalar(SKBitmap bitmap, Span<byte> destination, int destinationStride)
     {
         byte* pixels = (byte*)bitmap.GetPixels();
         int rowBytes = bitmap.RowBytes;
@@ -412,13 +434,33 @@ public sealed class SkiaBackend : IImageBackend
         }
     }
 
+    /// <summary>
+    /// 直通 RGBA32 → 位图（预乘）。同样交给 Skia 做 alpha 类型转换，失败回退标量。
+    /// </summary>
     public unsafe void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride)
     {
         var target = (SkiaFrame)frame;
-        byte* pixels = (byte*)target.Bitmap.GetPixels();
-        int rowBytes = target.Bitmap.RowBytes;
-        int width = target.Bitmap.Width;
-        int height = target.Bitmap.Height;
+        SKBitmap bitmap = target.Bitmap;
+
+        var sourceInfo = new SKImageInfo(bitmap.Width, bitmap.Height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+        fixed (byte* pointer = source)
+        {
+            using var pixmap = new SKPixmap(sourceInfo, (IntPtr)pointer, sourceStride);
+            if (pixmap.ReadPixels(bitmap.Info, bitmap.GetPixels(), bitmap.RowBytes))
+            {
+                return;
+            }
+        }
+
+        ImportPixelsScalar(bitmap, source, sourceStride);
+    }
+
+    private static unsafe void ImportPixelsScalar(SKBitmap bitmap, ReadOnlySpan<byte> source, int sourceStride)
+    {
+        byte* pixels = (byte*)bitmap.GetPixels();
+        int rowBytes = bitmap.RowBytes;
+        int width = bitmap.Width;
+        int height = bitmap.Height;
 
         for (int y = 0; y < height; y++)
         {
@@ -461,6 +503,7 @@ public sealed class SkiaBackend : IImageBackend
 
     public void Dispose()
     {
+        // 缓存里只会有本后端自己创建的 typeface；SKTypeface.Default 从不入缓存（见 ResolveTypeface）
         foreach (SKTypeface typeface in _typefaces.Values)
         {
             typeface.Dispose();
@@ -518,11 +561,33 @@ public sealed class SkiaBackend : IImageBackend
         }
 
         ownsTypeface = false;
-        return _typefaces.GetOrAdd(reference, static _ =>
+
+        if (_typefaces.TryGetValue(reference, out SKTypeface? cached) && cached is not null)
         {
-            using SKData builtIn = SKData.CreateCopy(BuiltInFont.Data.ToArray());
-            return SKTypeface.FromData(builtIn) ?? SKTypeface.Default;
-        });
+            return cached;
+        }
+
+        SKTypeface? created = CreateBuiltInTypeface();
+        if (created is null)
+        {
+            // 创建失败时返回进程级默认字体，但**绝不入缓存**：SKTypeface.Default 归 Skia 所有，
+            // 一旦进了 _typefaces，Dispose() 会把它释放掉，进程内其他使用方随后拿到的是已释放对象。
+            return SKTypeface.Default;
+        }
+
+        SKTypeface stored = _typefaces.GetOrAdd(reference, created);
+        if (!ReferenceEquals(stored, created))
+        {
+            created.Dispose();   // 并发下别家先进了缓存，丢掉自己这份
+        }
+
+        return stored;
+    }
+
+    private static SKTypeface? CreateBuiltInTypeface()
+    {
+        using SKData builtIn = SKData.CreateCopy(BuiltInFont.Data.ToArray());
+        return SKTypeface.FromData(builtIn);
     }
 
     /// <summary>

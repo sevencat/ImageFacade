@@ -74,6 +74,32 @@ public sealed class ResizePlannerTests
         Assert.True(plan.ScaledHeight <= 320);
         Assert.Equal(320, plan.OutputWidth);
     }
+
+    [Fact]
+    public void BoxPad_Does_Not_Upscale_Small_Source()
+    {
+        // 与 ImageSharp 一致：源图比目标框小时保持原尺寸居中补边，而不是放大
+        ResizePlan plan = ResizePlanner.Plan(100, 100, 400, 400, ResizeMode.BoxPad);
+
+        Assert.Equal(100, plan.ScaledWidth);
+        Assert.Equal(100, plan.ScaledHeight);
+        Assert.Equal(400, plan.OutputWidth);
+        Assert.Equal(400, plan.OutputHeight);
+        Assert.Equal(150, plan.PlaceX);
+        Assert.Equal(150, plan.PlaceY);
+        Assert.True(plan.NeedsComposite);
+    }
+
+    [Fact]
+    public void Pad_Does_Upscale_Small_Source()
+    {
+        // 对照组：Pad 没有"不放大"限制
+        ResizePlan plan = ResizePlanner.Plan(100, 100, 400, 400, ResizeMode.Pad);
+
+        Assert.Equal(400, plan.ScaledWidth);
+        Assert.Equal(400, plan.ScaledHeight);
+        Assert.False(plan.NeedsComposite);
+    }
 }
 
 public sealed class FacadeResizeTests

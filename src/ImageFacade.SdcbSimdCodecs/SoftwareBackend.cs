@@ -314,13 +314,20 @@ public sealed class SoftwareBackend : ImageBackendBase
         target.Canvas.CopyToStraight(buffer, stride);
 
         Canvas canvas = target.Canvas;
+        int returned = 0;
         lease = new PixelLease(
             buffer.AsSpan(0, stride * height),
             stride,
             () =>
             {
                 Import(canvas, buffer.AsSpan(0, stride * height), stride);
-                ArrayPool<byte>.Shared.Return(buffer);
+
+                // 第二层保护：PixelLease 被按值复制后各自的 _disposed 标志互相独立，
+                // 只有这个引用捕获的计数器能保证缓冲只还回池子一次。
+                if (Interlocked.Exchange(ref returned, 1) == 0)
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
             });
         return true;
     }

@@ -9,7 +9,7 @@
   <a href="https://www.nuget.org/packages/Sevencat.ImageFacade"><img alt="Downloads" src="https://img.shields.io/nuget/dt/Sevencat.ImageFacade"></a>
   <img alt=".NET" src="https://img.shields.io/badge/.NET-net8.0%20%7C%20net10.0-512BD4">
   <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue">
-  <img alt="Tests" src="https://img.shields.io/badge/tests-200%20passed-brightgreen">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-236%20passed-brightgreen">
   <img alt="Backends" src="https://img.shields.io/badge/backends-4-9cf">
 </p>
 
@@ -234,7 +234,7 @@ using var engine = new ImageEngine(new SoftwareBackend());    // 纯托管，无
 | `Min` | 等比缩放到**覆盖**目标框 | 缩放后尺寸 |
 | `Crop` | 等比铺满后居中裁切 | 目标尺寸 |
 | `Pad` | 等比放进后补边 | 目标尺寸 |
-| `BoxPad` | 先裁到目标比例再缩放，四角对齐 | 目标尺寸 |
+| `BoxPad` | 同 `Pad`，但**只缩小不放大**（源图比目标框小时原尺寸居中补边） | 目标尺寸 |
 
 `Max` / `Min` 的命名沿用 .NET 与 SixLabors 的习惯：`Max` 是"最大尺寸不超过目标框"。
 
@@ -423,12 +423,33 @@ OpenCV 解码后会把输入统一成 **8 位 BGRA**：灰度、灰度+alpha、�
 - 系统字体族（`FontRef.Family(...)`）只有 Skia 与 ImageSharp 支持；OpenCV 与软后端没有系统字体管理器，会退回内置字体。
 - 自备字体：`Font.Load*` 拿到实例后塞进 `TextStyle.FontFace`，可跨多次绘制复用。
 
+## 解码尺寸上限（防解压炸弹）
+
+`Load` / `LoadAsync` 默认拒绝超过 **1 亿像素**（约 400 MB RGBA）的图像：一个 20 KB 的 PNG 声明
+30000×30000 时，不会先分配 3.6 GB 再报错。
+
+```csharp
+// 默认：超过 1 亿像素抛 ImageSizeLimitExceededException
+using var image = engine.Load(untrustedBytes);
+
+// 允许更大的可信输入（0 = 不限制）
+using var big = engine.Load(path, new LoadOptions { MaxPixels = 0 });
+```
+
+- 校验在**门面**做，四个后端一视同仁：能读到头部（PNG / JPEG / BMP / GIF / WebP / TIFF / QOI / PNM）
+  就在**解码前**拒绝；读不到头部时才退化为解码后兜底。
+- `ImageSizeLimitExceededException.Width` / `Height` / `MaxPixels` 给出当时的数值；
+  它和"图损坏"是两类异常，方便映射成 413 与 400。
+- `ImageEngine.Create` / `FromPixels` 不受这个上限约束——那里的尺寸来自你的代码，不是外部输入。
+- 只限**像素数**，不限编码字节数：如果输入可能是超大文件流，请在喂给 `Load` 之前自己做长度检查。
+
 ## 出错时
 
 | 情况 | 异常 |
 |---|---|
 | 参数非法 | `ArgumentException` / `ArgumentOutOfRangeException` |
 | 后端不支持该能力 | `FeatureNotSupportedException`（含后端名、能力名、替代建议） |
+| 图像超过 `LoadOptions.MaxPixels` | `ImageSizeLimitExceededException` |
 | 三方库内部失败 | `ImageBackendException`（保留 `InnerException`，含后端名） |
 | 原生库缺失 | `ImageBackendException`（含安装提示，不是裸 `DllNotFoundException`） |
 
@@ -467,6 +488,7 @@ docs/images/                       # 截图
 | 文件 | 内容 |
 |---|---|
 | [plan.md](plan.md) | 设计、公开 API、SPI、里程碑、验收标准、性能目标 |
+| [planv2.md](planv2.md) | 第一批加固：解码尺寸上限、`PixelLease` 幂等、OpenCV/Skia 像素搬运优化（含实测数据与后续批次清单） |
 | [misc.md](misc.md) | 决策记录、许可证矩阵、逐库的坑、测试策略、已否决方案、落地记录（§Z） |
 | [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) | 第三方组件与许可证清单 |
 

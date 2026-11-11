@@ -178,4 +178,110 @@ public sealed class SkiaBackendTests
 
         Assert.Equal(new Rgba32(10, 20, 30), image.GetPixel(0, 0));
     }
+
+    [Fact]
+    public void Disposing_One_Backend_Does_Not_Break_Text_On_Another()
+    {
+        // 字体缓存按实例隔离；被释放的实例不能带走进程级共享对象（SKTypeface.Default）
+        var first = new ImageEngine(new SkiaBackend());
+        using var second = new ImageEngine(new SkiaBackend());
+
+        using (FacadeImage owned = first.Create(80, 40, Rgba32.White))
+        {
+            owned.DrawText("A", new PointF(4, 4), new TextStyle { Size = 24, Color = Rgba32.Black });
+        }
+
+        first.Dispose();
+
+        using FacadeImage other = second.Create(80, 40, Rgba32.White);
+        other.DrawText("A", new PointF(4, 4), new TextStyle { Size = 24, Color = Rgba32.Black });
+
+        Assert.True(CountDarkPixels(other) > 20, "另一个后端实例应该仍能画字");
+    }
+
+    private static int CountDarkPixels(FacadeImage image)
+    {
+        byte[] pixels = image.CopyPixels();
+        int dark = 0;
+        for (int i = 0; i < pixels.Length; i += 4)
+        {
+            if (pixels[i] < 128)
+            {
+                dark++;
+            }
+        }
+
+        return dark;
+    }
+
+    /// <summary>
+    /// 位图是预乘存储，导出时必须去预乘。走 Skia 原生 <c>ReadPixels</c> 转换后，
+    /// 半透明像素允许 ±3 的量化误差（预乘本身就有损），不透明像素仍要求逐字节相等。
+    /// </summary>
+    [Theory]
+    [InlineData(3, 64)]
+    [InlineData(4, 128)]
+    [InlineData(5, 200)]
+    [InlineData(7, 254)]
+    public void SemiTransparent_Pixels_Survive_Pixel_Round_Trip(int width, byte alpha)
+    {
+        const int height = 3;
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(width, height, new Rgba32(200, 100, 50, alpha));
+
+        byte[] pixels = image.CopyPixels();
+
+        for (int i = 0; i < width * height; i++)
+        {
+            int offset = i * 4;
+            Assert.InRange(Math.Abs(pixels[offset] - 200), 0, 3);
+            Assert.InRange(Math.Abs(pixels[offset + 1] - 100), 0, 3);
+            Assert.InRange(Math.Abs(pixels[offset + 2] - 50), 0, 3);
+            Assert.Equal(alpha, pixels[offset + 3]);
+        }
+    }
+
+    [Fact]
+    public void Opaque_Pixels_Survive_Pixel_Round_Trip_Exactly()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(5, 3, new Rgba32(0x20, 0x60, 0xC0));
+
+        byte[] pixels = image.CopyPixels();
+
+        for (int i = 0; i < pixels.Length; i += 4)
+        {
+            Assert.Equal(new byte[] { 0x20, 0x60, 0xC0, 0xFF }, pixels[i..(i + 4)]);
+        }
+    }
+
+    [Fact]
+    public void FromPixels_Imports_Straight_Pixels_Into_Premultiplied_Bitmap()
+    {
+        const int width = 5;
+        const int height = 2;
+        var pixels = new byte[width * height * 4];
+        for (int i = 0; i < width * height; i++)
+        {
+            pixels[i * 4] = 200;
+            pixels[i * 4 + 1] = 100;
+            pixels[i * 4 + 2] = 50;
+            pixels[i * 4 + 3] = 128;
+        }
+
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.FromPixels(pixels, width, height, width * 4);
+
+        byte[] roundTrip = image.CopyPixels();
+
+        // 直通 → 预乘 → 直通：预乘是有损的，允许 ±3
+        for (int i = 0; i < width * height; i++)
+        {
+            int offset = i * 4;
+            Assert.InRange(Math.Abs(roundTrip[offset] - 200), 0, 3);
+            Assert.InRange(Math.Abs(roundTrip[offset + 1] - 100), 0, 3);
+            Assert.InRange(Math.Abs(roundTrip[offset + 2] - 50), 0, 3);
+            Assert.Equal(128, roundTrip[offset + 3]);
+        }
+    }
 }

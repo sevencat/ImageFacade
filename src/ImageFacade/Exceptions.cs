@@ -30,3 +30,29 @@ public sealed class FeatureNotSupportedException : NotSupportedException
 
     public string BackendName { get; }
 }
+
+/// <summary>
+/// 解码出的图像超过 <see cref="LoadOptions.MaxPixels"/>：小文件声明巨大尺寸的"解压炸弹"就走这条。
+/// </summary>
+/// <remarks>
+/// 单独一个类型是为了让调用方能把"图太大"和"图损坏"分开处理（例如 HTTP 413 对 400）。
+/// <see cref="Width"/> / <see cref="Height"/> 是**声明值**：能读到头部时来自头部，否则来自已解出的帧。
+/// </remarks>
+public sealed class ImageSizeLimitExceededException : Exception
+{
+    public ImageSizeLimitExceededException(int width, int height, long maxPixels)
+        : base($"图像尺寸 {width}x{height}（{(long)width * height} 像素）超过上限 {maxPixels} 像素。"
+            + "如是可信输入，请调大 LoadOptions.MaxPixels（0 表示不限制）。")
+    {
+        Width = width;
+        Height = height;
+        MaxPixels = maxPixels;
+    }
+
+    public int Width { get; }
+
+    public int Height { get; }
+
+    /// <summary>当时生效的上限（像素数）。</summary>
+    public long MaxPixels { get; }
+}

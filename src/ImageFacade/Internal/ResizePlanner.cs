@@ -70,6 +70,14 @@ internal static class ResizePlanner
             case ResizeMode.BoxPad:
             {
                 float scale = MathF.Min((float)targetWidth / sourceWidth, (float)targetHeight / sourceHeight);
+
+                // BoxPad 的语义是"只缩小、不放大"（与 ImageSharp 一致）：源图比目标框小时原尺寸居中补边。
+                // Pad 没有这个限制，会等比放大到贴边。
+                if (mode == ResizeMode.BoxPad)
+                {
+                    scale = MathF.Min(scale, 1f);
+                }
+
                 int scaledWidth = mode == ResizeMode.BoxPad
                     ? Math.Clamp((int)MathF.Floor(sourceWidth * scale), 1, targetWidth)
                     : Math.Clamp(Round(sourceWidth * scale), 1, targetWidth);

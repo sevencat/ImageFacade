@@ -88,7 +88,7 @@ internal class FakeBackend : IImageBackend
         return false;
     }
 
-    public IFrame Decode(ReadOnlySpan<byte> data, in DecodeRequest request, out ImageMetadata metadata)
+    public virtual IFrame Decode(ReadOnlySpan<byte> data, in DecodeRequest request, out ImageMetadata metadata)
         => throw new NotSupportedException("FakeBackend 不解码。");
 
     public IFrame Clone(IFrame frame)

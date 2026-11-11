@@ -257,6 +257,40 @@ public sealed class OpenCvBackendTests
         Assert.Equal(new byte[] { 0x80, 0x40, 0x20, 0xFF }, bgra[..4]);
     }
 
+    /// <summary>通道互换走 SIMD，行尾不足 16 字节时必须仍有正确的标量尾。</summary>
+    [Theory]
+    [InlineData(3)]
+    [InlineData(7)]
+    [InlineData(11)]
+    [InlineData(13)]
+    public void Channel_Swap_Handles_Row_Widths_Not_Multiple_Of_16_Bytes(int width)
+    {
+        const int height = 5;
+        var pixels = new byte[width * height * 4];
+        for (int i = 0; i < width * height; i++)
+        {
+            pixels[(i * 4) + 0] = (byte)((i * 3) + 1);
+            pixels[(i * 4) + 1] = (byte)((i * 5) + 2);
+            pixels[(i * 4) + 2] = (byte)((i * 7) + 3);
+            pixels[(i * 4) + 3] = 255;
+        }
+
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.FromPixels(pixels, width, height, width * 4);
+
+        // RGBA → BGRA → RGBA：对合运算，必须逐字节还原
+        Assert.Equal(pixels, image.CopyPixels());
+
+        byte[] bgra = image.CopyPixels(PixelFormat.Bgra32);
+        for (int i = 0; i < width * height; i++)
+        {
+            Assert.Equal(pixels[(i * 4) + 2], bgra[(i * 4) + 0]);
+            Assert.Equal(pixels[(i * 4) + 1], bgra[(i * 4) + 1]);
+            Assert.Equal(pixels[(i * 4) + 0], bgra[(i * 4) + 2]);
+            Assert.Equal(pixels[(i * 4) + 3], bgra[(i * 4) + 3]);
+        }
+    }
+
     [Fact]
     public void AcquirePixels_Writes_Back_To_Image()
     {
