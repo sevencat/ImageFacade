@@ -93,30 +93,59 @@ public sealed partial class Font
     public float Measure(string text, float size)
     {
         ArgumentNullException.ThrowIfNull(text);
+        return Measure(text.AsSpan(), size);
+    }
 
+    /// <summary>
+    /// 测量一段字符切片的像素宽度。与 <see cref="Measure(string, float)"/> 逐码点同一条路径
+    /// （本仓库的托管字体栈不做字距调整，宽度就是字形 advance 之和），所以折行时量"段落前缀"
+    /// 可以直接传切片，不必先切一份 string。
+    /// </summary>
+    public float Measure(ReadOnlySpan<char> text, float size)
+    {
         var width = 0f;
         var widest = 0f;
-        foreach (var rune in text.EnumerateRunes())
+
+        // 手写解码循环而不是 foreach：SpanRuneEnumerator 是实现了接口的 ref struct，
+        // foreach 模式要用到 C# 13 的 "ref struct 接口" 特性（本仓库锁在 C# 12）。
+        for (int i = 0; i < text.Length;)
         {
-            if (rune.Value == '\n')
+            int codePoint = text[i];
+            int consumed = 1;
+            if (char.IsHighSurrogate((char)codePoint)
+                && i + 1 < text.Length
+                && char.IsLowSurrogate(text[i + 1]))
+            {
+                codePoint = char.ConvertToUtf32((char)codePoint, text[i + 1]);
+                consumed = 2;
+            }
+            else if (char.IsSurrogate((char)codePoint))
+            {
+                // 落单的代理项：与 Rune 语义一致地当成替换字符
+                codePoint = 0xFFFD;
+            }
+
+            i += consumed;
+
+            if (codePoint == '\n')
             {
                 widest = MathF.Max(widest, width);
                 width = 0f;
                 continue;
             }
 
-            if (rune.Value == '\r')
+            if (codePoint == '\r')
             {
                 continue;
             }
 
-            if (rune.Value == '\t')
+            if (codePoint == '\t')
             {
                 width += GetAdvance(' ', size) * 4f;
                 continue;
             }
 
-            width += GetGlyphMask(rune.Value, size).Advance;
+            width += GetGlyphMask(codePoint, size).Advance;
         }
 
         return MathF.Max(widest, width);

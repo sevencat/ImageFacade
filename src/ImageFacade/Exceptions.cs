@@ -32,11 +32,14 @@ public sealed class FeatureNotSupportedException : NotSupportedException
 }
 
 /// <summary>
-/// 解码出的图像超过 <see cref="LoadOptions.MaxPixels"/>：小文件声明巨大尺寸的"解压炸弹"就走这条。
+/// 解码出的图像超过 <see cref="LoadOptions.MaxPixels"/>，或从流读入的编码数据超过
+/// <see cref="LoadOptions.MaxEncodedBytes"/>。
 /// </summary>
 /// <remarks>
 /// 单独一个类型是为了让调用方能把"图太大"和"图损坏"分开处理（例如 HTTP 413 对 400）。
-/// <see cref="Width"/> / <see cref="Height"/> 是**声明值**：能读到头部时来自头部，否则来自已解出的帧。
+/// 像素维度：<see cref="Width"/> / <see cref="Height"/> 是**声明值**（能读到头部时来自头部，
+/// 否则来自已解出的帧）。字节维度：<see cref="Width"/> / <see cref="Height"/> /
+/// <see cref="MaxPixels"/> 均为 0，改用 <see cref="MaxEncodedBytes"/> / <see cref="EncodedBytes"/>。
 /// </remarks>
 public sealed class ImageSizeLimitExceededException : Exception
 {
@@ -49,12 +52,30 @@ public sealed class ImageSizeLimitExceededException : Exception
         MaxPixels = maxPixels;
     }
 
+    /// <summary>
+    /// 编码字节数超限（还没解码）。此时 <see cref="Width"/> / <see cref="Height"/> /
+    /// <see cref="MaxPixels"/> 都是 0——尺寸未知，也不该由它们表达。
+    /// </summary>
+    public ImageSizeLimitExceededException(long maxEncodedBytes, long actualEncodedBytes)
+        : base($"编码数据已读入 {actualEncodedBytes} 字节，超过上限 {maxEncodedBytes} 字节。"
+            + "如是可信输入，请调大 LoadOptions.MaxEncodedBytes（0 表示不限制）。")
+    {
+        MaxEncodedBytes = maxEncodedBytes;
+        EncodedBytes = actualEncodedBytes;
+    }
+
     public int Width { get; }
 
     public int Height { get; }
 
-    /// <summary>当时生效的上限（像素数）。</summary>
+    /// <summary>当时生效的上限（像素数）；字节维度超限时为 0。</summary>
     public long MaxPixels { get; }
+
+    /// <summary>当时生效的编码字节上限；像素维度超限时为 0。</summary>
+    public long MaxEncodedBytes { get; }
+
+    /// <summary>触发异常时已经读入的字节数；像素维度超限时为 0。</summary>
+    public long EncodedBytes { get; }
 }
 
 /// <summary>

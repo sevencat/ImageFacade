@@ -125,7 +125,15 @@ public sealed class FacadeImage : IDisposable
                 throw;
             }
 
-            ReplaceFrame(frame, plan.OutputWidth, plan.OutputHeight);
+            ReplaceFrame(
+                frame,
+                plan.OutputWidth,
+                plan.OutputHeight,
+                // 合成只会"引入"透明，不会把透明变回不透明：源图本来就带 alpha，或者补边色本身半透明
+                // 且确实有补边区域（Crop 时 Fill 出来的整块被贴图完全盖住，不产生可见的透明像素）。
+                hasAlpha: _metadata.HasAlpha || (HasPadArea(plan) && options.PadColor.A < 255),
+                // 这里只有拉伸 / 裁剪 / 补边，没有任何旋转或翻转，EXIF 方向值原样继承。
+                orientation: _metadata.Orientation);
             return this;
         }
         finally
@@ -642,7 +650,13 @@ public sealed class FacadeImage : IDisposable
             return;
         }
 
-        ReplaceFrame(ResizeFrame(width, height, sampler), width, height);
+        ReplaceFrame(
+            ResizeFrame(width, height, sampler),
+            width,
+            height,
+            // 重采样不会凭空产生 alpha，也不会把已有 alpha 变没；纯拉伸不改 EXIF 方向。
+            hasAlpha: _metadata.HasAlpha,
+            orientation: _metadata.Orientation);
     }
 
     /// <summary>
@@ -666,9 +680,15 @@ public sealed class FacadeImage : IDisposable
     }
 
     internal TextMetrics MeasureSingleLine(string text, TextStyle style)
+        => MeasureSingleLine(text.AsSpan(), style);
+
+    /// <summary>
+    /// 量一段**切片**的度量：折行时每个候选前缀都只传 <c>paragraph.AsSpan(start, len)</c>，
+    /// 不再为它分配一份 substring。后端没重写切片版时由接口默认实现退化成 <c>new string(...)</c>。
+    /// </summary>
+    internal TextMetrics MeasureSingleLine(ReadOnlySpan<char> text, TextStyle style)
     {
-        var spec = new TextSpec(text, PointF.Empty, style);
-        if (!_backend.TryMeasureText(Frame, in spec, out TextMetrics metrics))
+        if (!_backend.TryMeasureText(Frame, text, in style, out TextMetrics metrics))
         {
             throw new FeatureNotSupportedException(nameof(MeasureText), _backend.Name);
         }
@@ -817,14 +837,28 @@ public sealed class FacadeImage : IDisposable
 
     // ---- 辅助 ----
 
-    private void ReplaceFrame(IFrame frame, int width, int height)
+    /// <summary>
+    /// 换掉当前帧，并让 <see cref="Metadata"/> 跟上新帧的**真实**状态。
+    /// </summary>
+    /// <remarks>
+    /// 宽高必须由调用方给（帧上也有，但显式传参能保证元数据与帧不会各说一套）；
+    /// alpha / orientation 也只能由调用方按"这次几何变换做了什么"静态推导——
+    /// 既有的 <see cref="IFrame"/> 没有 alpha 能力位，为这个去扫全图代价太高（planv2 §9.11 第 9、21 条）。
+    /// 例：纯拉伸 / 裁剪 / 补不透明边 → 继承原来的 alpha；补透明边 → 一定产生透明像素；
+    /// 只有旋转/翻转才可能改变方向值，而当前没有这类操作。
+    /// </remarks>
+    private void ReplaceFrame(IFrame frame, int width, int height, bool hasAlpha, int orientation)
     {
         IFrame previous = Frame;
         _frame = frame;
         previous.Dispose();
         IsZeroCopy = false;
-        _metadata = new ImageMetadata(_metadata.Format, width, height, _metadata.Orientation, _metadata.HasAlpha, _metadata.IccProfile);
+        _metadata = new ImageMetadata(_metadata.Format, width, height, orientation, hasAlpha, _metadata.IccProfile);
     }
+
+    /// <summary>缩放结果小于输出框 → 有补边区域（贴图盖不满）。</summary>
+    private static bool HasPadArea(ResizePlan plan)
+        => plan.ScaledWidth < plan.OutputWidth || plan.ScaledHeight < plan.OutputHeight;
 
     private static void Fill(Span<byte> buffer, Rgba32 color)
     {

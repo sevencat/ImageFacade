@@ -146,6 +146,31 @@ public sealed class SoftwareBackendTests
         Assert.Equal(Rgba32.White, image.GetPixel(2, 2));
     }
 
+    /// <summary>
+    /// 折行用的切片版测量必须与 string 版一致：托管字体栈按码点累加 advance，两条路同源。
+    /// </summary>
+    [Fact]
+    public void MeasureText_Slice_Overload_Matches_String_Overload()
+    {
+        using var backend = new SoftwareBackend();
+        using IFrame frame = backend.Create(8, 8, null);
+
+        var style = new TextStyle { Font = FontRef.BuiltIn, Size = 24 };
+        string[] samples = ["Wg文字", "中文 Ab", "a", "W", "A😀b", "abcdefghij"];
+
+        foreach (string text in samples)
+        {
+            var spec = new TextSpec(text, PointF.Empty, style);
+            Assert.True(backend.TryMeasureText(frame, in spec, out TextMetrics fromString));
+            Assert.True(backend.TryMeasureText(frame, text.AsSpan(), in style, out TextMetrics fromSlice));
+
+            Assert.Equal(fromString.Width, fromSlice.Width);
+            Assert.Equal(fromString.Ascent, fromSlice.Ascent);
+            Assert.Equal(fromString.Descent, fromSlice.Descent);
+            Assert.Equal(fromString.LineGap, fromSlice.LineGap);
+        }
+    }
+
     [Fact]
     public void DrawText_With_BuiltIn_Font_Draws_Chinese()
     {
@@ -289,6 +314,68 @@ public sealed class SoftwareBackendTests
         finally
         {
             File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Load_From_Path_Maps_File_And_Releases_It()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(8, 8, new Rgba32(0, 128, 255));
+
+        string path = Path.Combine(Path.GetTempPath(), $"imagefacade-{Guid.NewGuid():N}.png");
+        try
+        {
+            image.Save(path);
+            byte[] onDisk = File.ReadAllBytes(path);
+
+            using FacadeImage loaded = engine.Load(path);
+
+            Assert.Equal(8, loaded.Width);
+            Assert.Equal(new Rgba32(0, 128, 255), loaded.GetPixel(4, 4));
+
+            // 映射在解码结束时就释放：Windows 上还有句柄时这里会抛 IOException
+            File.Delete(path);
+            Assert.False(File.Exists(path));
+
+            // 解码出来的像素与"直接喂字节"完全一致
+            using FacadeImage fromBytes = engine.Load(onDisk);
+            Assert.Equal(fromBytes.GetPixel(4, 4), loaded.GetPixel(4, 4));
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task LoadAsync_From_Path_Maps_File_And_Releases_It()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(8, 8, Rgba32.Red);
+
+        string path = Path.Combine(Path.GetTempPath(), $"imagefacade-{Guid.NewGuid():N}.png");
+        try
+        {
+            image.Save(path);
+
+            using FacadeImage loaded = await engine.LoadAsync(path, cancellationToken: TestContext.Current.CancellationToken);
+
+            Assert.Equal(8, loaded.Width);
+            Assert.Equal(Rgba32.Red, loaded.GetPixel(4, 4));
+
+            File.Delete(path);
+            Assert.False(File.Exists(path));
+        }
+        finally
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
         }
     }
 

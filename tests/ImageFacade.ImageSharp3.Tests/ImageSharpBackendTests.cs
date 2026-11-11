@@ -14,6 +14,32 @@ public sealed class ImageSharpBackendTests
     private static ImageEngine CreateEngine()
         => new(new ImageSharpBackend());
 
+    /// <summary>
+    /// 折行用的切片版测量必须与 string 版一致（<c>TextMeasurer.MeasureAdvance(ReadOnlySpan&lt;char&gt;, …)</c>
+    /// 与 string 重载同一条整形路径），否则省下的分配会换来不同的折行位置。
+    /// </summary>
+    [Fact]
+    public void MeasureText_Slice_Overload_Matches_String_Overload()
+    {
+        using var backend = new ImageSharpBackend();
+        using IFrame frame = backend.Create(8, 8, null);
+
+        var style = new TextStyle { Font = FontRef.BuiltIn, Size = 24 };
+        string[] samples = ["Wg文字", "中文 Ab", "a", "W", "A😀b", "abcdefghij"];
+
+        foreach (string text in samples)
+        {
+            var spec = new TextSpec(text, PointF.Empty, style);
+            Assert.True(backend.TryMeasureText(frame, in spec, out TextMetrics fromString));
+            Assert.True(backend.TryMeasureText(frame, text.AsSpan(), in style, out TextMetrics fromSlice));
+
+            Assert.Equal(fromString.Width, fromSlice.Width);
+            Assert.Equal(fromString.Ascent, fromSlice.Ascent);
+            Assert.Equal(fromString.Descent, fromSlice.Descent);
+            Assert.Equal(fromString.LineGap, fromSlice.LineGap);
+        }
+    }
+
     private static int CountInk(FacadeImage image)
     {
         byte[] pixels = image.CopyPixels();

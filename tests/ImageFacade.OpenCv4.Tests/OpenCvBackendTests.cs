@@ -20,6 +20,32 @@ public sealed class OpenCvBackendTests
 {
     private static ImageEngine CreateEngine() => new(new OpenCvBackend());
 
+    /// <summary>
+    /// 折行用的切片版测量必须与 string 版一致：托管字体栈按码点累加 advance，
+    /// 切片版与 string 版是同一条路径，结果应当逐字节相同。
+    /// </summary>
+    [Fact]
+    public void MeasureText_Slice_Overload_Matches_String_Overload()
+    {
+        using var backend = new OpenCvBackend();
+        using IFrame frame = backend.Create(8, 8, null);
+
+        var style = new TextStyle { Font = FontRef.BuiltIn, Size = 24 };
+        string[] samples = ["Wg文字", "中文 Ab", "a", "W", "A😀b", "abcdefghij"];
+
+        foreach (string text in samples)
+        {
+            var spec = new TextSpec(text, PointF.Empty, style);
+            Assert.True(backend.TryMeasureText(frame, in spec, out TextMetrics fromString));
+            Assert.True(backend.TryMeasureText(frame, text.AsSpan(), in style, out TextMetrics fromSlice));
+
+            Assert.Equal(fromString.Width, fromSlice.Width);
+            Assert.Equal(fromString.Ascent, fromSlice.Ascent);
+            Assert.Equal(fromString.Descent, fromSlice.Descent);
+            Assert.Equal(fromString.LineGap, fromSlice.LineGap);
+        }
+    }
+
     private static int CountInk(FacadeImage image)
     {
         byte[] pixels = image.CopyPixels();

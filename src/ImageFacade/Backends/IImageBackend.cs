@@ -70,6 +70,29 @@ public interface IImageBackend : IDisposable
     /// <summary>单行测量（advance 宽 + 字体度量）。门面的 <c>MeasureText</c> 与 <c>DrawText</c> 共用这份结果。</summary>
     bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics);
 
+    /// <summary>
+    /// 单行测量的**切片版**：<paramref name="text"/> 可以只是调用方缓冲区里的一段，不必是独立的 string。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 折行时门面要量的是"段落从 <c>start</c> 到 <c>end</c>"的每个候选前缀，长度递增地量一遍。
+    /// 走 <see cref="TextSpec"/> 那条路每个候选都得先 <c>Substring</c> 出一份 string，一行的候选数量
+    /// 是 O(n)，整段就是 O(n²) 个短命字符串；直接吃切片可以全部省掉。
+    /// </para>
+    /// <para>
+    /// 默认实现把切片 <c>new string(...)</c> 后转调 <see cref="TryMeasureText(IFrame, in TextSpec, out TextMetrics)"/>，
+    /// 所以**结果与旧路径完全一致**，已有后端不必改动。底层库本身就支持切片的后端应当重写它
+    /// （Skia 的 <c>SKFont.MeasureText(ReadOnlySpan&lt;char&gt;)</c>、SixLabors.Fonts 的
+    /// <c>TextMeasurer.MeasureAdvance(ReadOnlySpan&lt;char&gt;, …)</c>、本仓库托管字体栈的
+    /// <see cref="Font.Measure(ReadOnlySpan{char}, float)"/>），重写后这条路径零分配。
+    /// </para>
+    /// </remarks>
+    bool TryMeasureText(IFrame frame, ReadOnlySpan<char> text, in TextStyle style, out TextMetrics metrics)
+    {
+        var spec = new TextSpec(new string(text), PointF.Empty, style);
+        return TryMeasureText(frame, in spec, out metrics);
+    }
+
     // ---- 像素 ----
 
     void Clear(IFrame frame, Rgba32 color);

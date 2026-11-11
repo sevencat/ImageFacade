@@ -5,13 +5,15 @@
 > Skia 解码零拷贝、`ImageEngine` 所有权、`Default` 原子读写、`BuiltInFont` 单例。
 > 第 3 批（§9）：`Save` 改"失败即删 + 异常提示"、超大字号抛异常、Skia 自备字体缓存、
 > 字形缓存 LRU、NMS O(n log n)、`Tensorizer` 去除法、`TensorBuffer` 可 Trim、引擎释放后报错。
+> 第 4 批（§10）：`Load(Stream)` 编码字节数上限、`ReplaceFrame` 后的 `ImageMetadata` 一致、
+> `TextLayouter.Wrap` 去掉重复测量与字典开销。
 > 其余已识别问题列入 §7「后续批次」，带状态标记。
 
 ## 0. 基线
 
 - 构建：`dotnet build ImageFacade.slnx -c Release`，0 警告 0 错误。
 - 测试：改动前 **202** 通过（ImageFacade 98 / OpenCv4 28 / OpenCv5 28 / ImageSharp2 15 / ImageSharp3 15 / Sdcb 18）；
-  第 1 批后 236，第 2 批后 247，第 3 批后 **256**。
+  第 1 批后 236，第 2 批后 247，第 3 批后 **256**，第 4 批后 **272**。
 - 已修构建阻塞：`src/ImageFacade.SdcbSimdCodecs/ImageFacade.SdcbSimdCodecs.csproj` 的 XML 注释里含
   `--skip-duplicate`，XML 注释不允许出现 `--`，整个解决方案无法加载（MSB4025）。改为文字描述。
 
@@ -250,13 +252,13 @@ Skia 端到端 4.799 ms 里包含一次 `Pin` + 原生转换；旧的标量内�
 |---|---|---|---|
 | 7 | `wrap: true` 零拷贝全后端返回 false，`IsZeroCopy` 恒 false，README 表述相反 | 各后端 `TryWrapPixels` | 待办 |
 | 8 | `TryDrawFrame` 三后端语义不同（ImageSharp 强制 A=255、OpenCV 忽略 alpha） | 各后端 | 待办 |
-| 9 | `ImageMetadata` 的 `HasAlpha` / `Orientation` 在 `ReplaceFrame` 后不更新 | `FacadeImage.cs` | 待办 |
+| 9 | `ImageMetadata` 的 `HasAlpha` / `Orientation` 在 `ReplaceFrame` 后不更新 | `FacadeImage.cs` | **已修（§10）** |
 | 10 | `BoxPad` 文档与实现不符（文档说先裁；实现缺"不放大"） | `README.md` / `ResizePlanner.cs` | **已修（§8）** |
 | 11 | 门面 `TextLayouter` 与 `Font.Layout` 两套折行/行高实现 | `Internal/TextLayouter.cs` / `Font.Layout.cs` | 待办 |
 | 12 | 异步编码路径跳过 `SupportedEncodeFormats` 检查 | `FacadeImage.cs` | **已修（§8）** |
 | 14 | 字形缓存满了整体清空（应 LRU）；按 1/4 px 量化但用真实 size 光栅化 | `Font.cs` | **已修（§9）** |
 | 15 | 超大字号静默返回空白 mask | `GlyphRasterizer.cs` | **已修（§9）** |
-| 18 | `TextLayouter.Wrap` O(n²) + 每次 substring 分配 | `TextLayouter.cs:112` | 待办 |
+| 18 | `TextLayouter.Wrap` O(n²) + 每次 substring 分配 | `TextLayouter.cs:112` | **已修（§10，分配与字典开销部分）** |
 | 19 | `Nms` 插入排序 O(n²)，模型原始输出量级会爆 | `Nms.cs` | **已修（§9）** |
 | 20 | `Resize(ResizeOptions)` 合成缓动用 `new byte[]`，未走池 | `FacadeImage.cs` | **已修（§8）** |
 | 21 | 软后端每次导出全图扫 alpha（`assumeOpaque` 未传） | `Canvas.cs:186` | 待办（用户待定） |
@@ -271,7 +273,7 @@ Skia 端到端 4.799 ms 里包含一次 `Pin` + 原生转换；旧的标量内�
 | 30 | `ImageEngine.Default` 可变静态、无同步 | `ImageEngine.cs` | **已修（§8）** |
 | 31 | `Resize` 失败后图像停在"已缩放未合成"的中间态 | `FacadeImage.cs` | **已修（§8）** |
 | 32 | `Capabilities` 无校验（Skia 声明 AOT 但 csproj 未设） | 各后端 | 待办 |
-| — | `Load(Stream)` 编码字节数上限 | `ImageEngine.cs` | 待办 |
+| — | `Load(Stream)` 编码字节数上限 | `ImageEngine.cs` | **已修（§10）** |
 | — | `Save(path)` 失败留下半截文件 / 覆盖原图（评审时新发现） | `FacadeImage.cs` | **已修（§9，语义按用户要求调整）** |
 | — | `BuiltInFont` 双检锁对 `ReadOnlyMemory` 非原子发布（评审时新发现） | `Text/BuiltInFont.cs` | **已修（§8）** |
 | — | `PixelConverter` 的 `width * bpp` 未 checked，宽高极大时溢出成负数（评审时新发现） | `Pixels/PixelConverter.cs` | **已修（§9）** |
@@ -504,7 +506,170 @@ catch (Exception ex) when (stream is not null)
 |---|---|
 | 21 | 用户表示"后面再想想"——需要决定是扩 `TryCopyPixels` 签名还是在软后端自己记状态 |
 | 11 | 两套排版引擎合并涉及公开行为，需要先定"折行规则以谁为准" |
-| 18 | `TextLayouter.Wrap` 改线性扫描会改变折行位置，要连带更新视觉基线 |
+| 18 | **部分修（§10、§10.6）**：去掉了每行长度 1 的无用测量、"每个前缀一条字典记录"的哈希 / 长期持有开销，以及每个候选的 substring（§10.6）；折行位置与扫描顺序**刻意不变**（改成二分 / 跳跃扫描依赖"前缀宽度随长度单调不减"，无法对任意字体成立），所以测量次数仍是 O(n²) |
 | 29 | CI 加 `NuGetAudit` 可能因存量告警卡住构建，需要先跑一遍看有多少 |
 | 7、8 | 零拷贝与 `TryDrawFrame` 语义属于 SPI 设计决策，改动面大 |
-| 9、32 | `ImageMetadata` 正确更新需要扫描全图判断 alpha，成本与收益要权衡 |
+| 32 | `Capabilities` 无校验需要先定各后端的能力语义（第 9 条已在 §10 用"静态推导"解决，不再需要扫全图） |
+
+---
+
+## 10. 第四批：流上限、元数据一致、折行开销
+
+基线 256 → **272**（+16 个用例）。三项都只往公开面**加**东西（`LoadOptions` 一个属性、
+异常类型一个重载 + 两个只读属性），不改已有成员签名，也不涉及第 7/8/11/21/29/32 条的 SPI 语义。
+
+### 10.1 `Load(Stream)` / `LoadAsync(Stream)` 的编码字节数上限（§1「不做」的遗留项）
+
+> 后记：文件路径那条（`Load(path)`）在 §10.7 也接上了这个上限——它是按文件长度**先拒后读**的。
+
+**问题**：两条 Stream 路径用 `CopyTo` / `CopyToAsync` 把入站数据整段拷进 `MemoryStream`，
+没有任何长度上限。`MaxPixels` 只拦"小文件声明巨大尺寸"，拦不住"合法尺寸但几百 MB"或者是
+**根本不是图片**的巨型请求体——那部分内存在解码之前就已经吃掉了。
+
+**改法**：
+
+- `LoadOptions.MaxEncodedBytes`（`long`，默认 **0 = 不限制**）。默认不限制是为了**向后兼容**：
+  现有调用方不会因为升级突然开始收到异常。README 与 XML 注释都写明这个默认值。
+- `ImageSizeLimitExceededException` 增加 `(long maxEncodedBytes, long actualEncodedBytes)` 重载，
+  以及只读属性 `MaxEncodedBytes` / `EncodedBytes`；原来的 `(int, int, long)` 重载与
+  `Width` / `Height` / `MaxPixels` 一字未动，字节维度超限时这三个保持 0。
+- 读入改成 `ArrayPool<byte>` + `Stream.Read` 循环，缓冲**最多长到"上限 + 1"字节**：多读 1 字节
+  就够判定超限，不需要真的读完。`CanSeek` 时先按 `Length - Position` 快速拒绝（不可信，读循环
+  仍然累计校验）。
+- 读完把"池化缓冲 + 实际长度"交给既有的 `Load(ReadOnlySpan<byte>)`，头部嗅探与解码后兜底两道闸
+  完全不变；`try/finally` 归还缓冲（包括抛异常、取消的路径）。
+- `LoadAsync(Stream)` 用 `ReadAsync(Memory<byte>, ct)`，没有为了复用同步代码引入 sync-over-async：
+  读循环里的扩容返回新缓冲（旧的就地归还池），跨 `await` 用普通局部变量而不是 `ref`。
+- `MemoryStream` 且 `Position == 0` 的快路径保留（不额外拷贝），但同样过字节上限。
+- 边界：`MaxEncodedBytes <= 0` 且数据真的超过 .NET 单数组上限（约 2 GB）时抛同一个异常，
+  并把 `Array.MaxLength` 当作上限上报——否则只能 OOM，报一个明确数字更有用。
+
+**用例**：`Default_MaxEncodedBytes_Is_Unlimited`、`Load_MemoryStream_Rejects_Data_Over_Limit`、
+`Load_MemoryStream_Accepts_Data_At_Exact_Limit`、`Load_Stream_Rejects_Data_Over_Limit`、
+`Load_Stream_Stops_Reading_Once_Over_Limit`、`Load_Stream_Rejects_By_Seekable_Length_Without_Reading`、
+`LoadAsync_Stream_Rejects_Data_Over_Limit`、`Load_Stream_Decodes_Real_Image_Within_Limit`、
+`LoadAsync_Stream_Decodes_Real_Image_Within_Limit`。
+
+### 10.2 `ReplaceFrame` 后的 `ImageMetadata`（原第 9 条）
+
+**问题**：`ReplaceFrame` 原样搬运旧的 `HasAlpha` / `Orientation`。`Pad` 补**透明**边之后图上
+明明有透明像素，`Metadata.HasAlpha` 仍然是 `false`（`PadColor` 默认就是 `Rgba32.Transparent`，
+所以这是默认路径上的错误）。
+
+**改法**：`ReplaceFrame` 的签名加上 `hasAlpha` / `orientation`，由**调用方按这次变换做了什么静态推导**：
+
+| 操作 | `HasAlpha` | `Orientation` |
+|---|---|---|
+| 纯拉伸 / 裁剪 / 补不透明边 | 继承原值（重采样不创造也不消灭 alpha） | 继承（不旋转） |
+| `Pad` / `BoxPad` 且补边色 `A < 255` | 一定为 `true`（贴图盖不满，补出来的像素就是透明的） | 继承 |
+
+判定"有没有补边区域"用 `ScaledWidth < OutputWidth || ScaledHeight < OutputHeight`：
+`Crop` 虽然也先 `Fill` 整块，但贴图把它完全盖住了，不产生可见透明像素。
+
+为什么不去问后端：`IFrame` 只有 `Width` / `Height`，没有 alpha 能力位；加能力位是 SPI 变更，
+扫全图判断 alpha 是 §9.11 明确否掉的开销。等以后真的加了 `Rotate` / `Flip`，同一处按
+"90° 交换宽高、180° 不改、翻转不改"继续往下推即可（`ReplaceFrame` 的注释里写了这个约定）。
+
+**用例**：`Resize_Refreshes_Width_Height_Alpha_And_Orientation`（解码元数据 8×6 / orientation 6 /
+hasAlpha true / 带 ICC → `Resize(4,3)` 后宽高、alpha、方向、格式、ICC 全部正确）、
+`Resize_Pad_With_Transparent_Color_Sets_HasAlpha`、`Resize_Pad_With_Opaque_Color_Keeps_HasAlpha_False`、
+`Resize_Crop_Keeps_HasAlpha`、`Resize_Stretch_Keeps_Opaque`。
+
+### 10.3 `TextLayouter.Wrap` 的重复测量与字典开销（原第 18 条，**部分**）
+
+**问题**：查找"第一个超宽前缀"时，每个候选长度都要
+①分配一份 substring、②在 `Dictionary<string, TextMetrics>` 里查一次 / 写一条（`Ordinal` 等于对
+整段前缀做一次 O(长度) 的哈希与比较）、③再让后端整形一遍。字典还把这些前缀字符串**全部留着**
+——长段落等于按前缀长度累加一遍常驻内存（O(n²)），比时间更难看。另外长度 1 的候选也会量一次，
+而溢出判定要求 `end - start > 1`，那次结果从头到尾没用过。
+
+**改法（结果不变的部分）**：
+
+- 候选的度量改成写进**按终点下标索引的池化 `TextMetrics[]`**（`ArrayPool<TextMetrics>`，每段一次
+  租用、`finally` 归还），不再为每个候选建字典条目；行文本仍只在真正产出一行时分配一次。
+- 长度 1 的候选不再测量（断点机会判定照旧做，`lastBreak == start` 的分支依赖它）。
+- 产出一行时如果尾部没有空格被裁掉，行度量**直接复用**已经量过的那个前缀（宽度与行高都有），
+  不回字典也不问后端；只有 `TrimEnd` 真的改变了内容、或整行只有 1 个字符时才补量一次。
+- `Layout` 里"再遍历一遍量每行宽度"的数组随之去掉：宽度由折行阶段带出来，第一行的完整度量
+  顺手带出给行高用，所以默认（`LineHeight` 未指定）那条路径也不会多量一次。
+
+**明确放弃的部分**：
+
+- ~~`ReadOnlySpan<char>` 切片：`IImageBackend.TryMeasureText` 吃的是 `TextSpec.Text`（`string`），
+  要让它吃 span 就是改公开 SPI，本批不做。所以每个候选仍有一份 substring 分配。~~
+  **已补做，见 §10.6**（只加不改，没动已有签名）。
+- 把线性扫描换成二分 / 跳跃扫描：**唯一**能真正消掉 O(n²) 测量次数的办法，但它依赖
+  "前缀宽度随长度单调不减"，对任意字体无法证明（负字距、组合字符都可能让更长的前缀更窄），
+  会改变折行位置——那是本条的硬约束。所以测量次数仍是 O(n²)，扫描顺序逐字符不变。
+
+**用例**：`Wrap_Result_Matches_Reference_Implementation`（差分测试：替身宽度对前缀长度**故意不单调**，
+512 个"文本 × 最大宽度"用例，显式行高与 `LineHeight = 0` 各跑一遍，与照抄旧算法的参考实现逐行比对
+行文本、行宽与排版尺寸）、`Wrap_Does_Not_Measure_One_Character_Candidates`（10 字符一行放得下时
+只量 2..10 共 9 次）。
+
+### 10.4 本批验收
+
+- [x] `dotnet build ImageFacade.slnx -c Release`：0 警告 0 错误（各工程 `TreatWarningsAsErrors=true`）。
+- [x] `dotnet test`：**272 通过**（256 → 272，+16），六个测试工程全绿。
+- [x] 1 MB 输入配 1000 字节上限时只读了 1 KB 出头就抛 `ImageSizeLimitExceededException`（不是读完再报）。
+- [x] `MaxEncodedBytes` 保持默认 0 时，256 KB 输入一路读到后端（`FeatureNotSupportedException`），没有新异常。
+- [x] 可寻址流 `Length` 已超限时 `Read` 一次都没被调用。
+- [x] PNG 经过不可寻址流（同步 / 异步两条路径）解码结果正确，说明交给 span 的长度精确、没带上池子的多余字节。
+- [x] 补透明边后 `HasAlpha` 变 `true`；补不透明边、裁剪、拉伸保持原值。
+- [x] `Resize` 后 `Metadata` 的宽高 / 方向 / 格式 / ICC 与新帧一致。
+- [x] 折行差分测试 512 例 × 2 种行高设置全等（含非单调宽度），行文本逐字符相同。
+
+### 10.5 本批未做
+
+- 第 18 条只剩"测量次数"的 O(n²)：不做二分 / 跳跃扫描，理由见 §10.3。
+- 第 7、8、11、21、29、32 条按要求不动（需要先定 SPI 语义或用户决策）。
+
+### 10.6 折行候选的切片测量（补 §10.3 里"明确放弃"的第一项）
+
+§10.3 把 `ReadOnlySpan<char>` 切片判成"要改公开 SPI 所以不做"，其实可以**只加不改**：
+
+- `IImageBackend` 加一个**带默认实现**的 `TryMeasureText(IFrame, ReadOnlySpan<char>, in TextStyle, out TextMetrics)`，
+  默认实现把切片 `new string(...)` 后转调原来的 `TextSpec` 重载，所以老后端一行都不必改、结果逐字节不变。
+- 底层本来就吃切片的四个后端各写三行顶替它（Skia 的 `SKFont.MeasureText(ReadOnlySpan<char>)`、
+  SixLabors 的 `TextMeasurer.MeasureAdvance(ReadOnlySpan<char>, …)`、托管字体栈新增的
+  `Font.Measure(ReadOnlySpan<char>, float)`）。`ImageBackendBase` 也把这个槽位做成 `virtual`，
+  派生类想接就 `override`。
+- `FacadeImage.MeasureSingleLine` 多一个切片重载，`TextLayouter.MeasurePrefix` 直接传
+  `paragraph.AsSpan(start, len)`：整条折行路径不再为每个候选分配一份 substring。
+- **踩坑记录**：默认接口方法在类里**不能 `override`**，实现类直接声明同名 `public` 成员即可顶替；
+  若基类已经实现了该接口，派生类必须**重新列出接口**才会重新做映射（测试替身里验证过）。
+- 第 18 条的性质没变：**测量次数仍是 O(n²)**，扫描顺序逐字符不变。
+
+**用例**：`Wrap_Measures_Prefixes_Through_Slice_Overload`（9 个候选全走切片版、string 版 0 次）、
+`Wrap_Result_Is_Identical_With_And_Without_Slice_Overload`（重写切片版与走默认回退两条路，5 段文本 × 4 个宽度逐行相同）、
+四个后端各自的 `MeasureText_Slice_Overload_Matches_String_Overload`（宽 / ascent / descent / lineGap 全等）。
+测试数 272 → **280**（+8：核心 3 + Skia 1 + ImageSharp / OpenCV / Sdcb 各 1，其中 ImageSharp 与 OpenCV 的源码各被两个主版本工程编译一遍）。
+
+### 10.7 `Load(path)` 改只读内存映射（顺带按文件长度查上限）
+
+`Load(path)` / `LoadAsync(path)` 原来是一次 `File.ReadAllBytes` / `File.ReadAllBytesAsync`：
+先按文件大小分配一份等长托管数组，再整体拷一遍，然后才交给解码器——大图就是一次纯浪费的 LOH 分配。
+仿 Sdcb.SimdCodecs 2.0 `ByteSource.FromFile` 的思路改成**只读内存映射**（新文件 `Internal/MappedFileBuffer.cs`）：
+
+- `FileStream` 打开 → 用**同一个句柄**量长度 → 检查 → `MemoryMappedFile` 映射 → 解码器直接吃
+  `ReadOnlySpan<byte>`/`ReadOnlyMemory<byte>`（`MappedFileBuffer` 就是一块 `MemoryManager<byte>`）。
+  长度和映射同源，中间不会被换文件；`FileShare.Read` 与 `File.ReadAllBytes` 一致（别人能读、不能写）。
+- **顺带查长度**：空文件抛 `ArgumentException`（`ParamName = "path"`）；超过 `MaxEncodedBytes`
+  （默认 0 = 不限制）或单块缓冲上限（`int.MaxValue`，span 长度是 `int`）抛
+  `ImageSizeLimitExceededException`。两种都在映射之前判完，**一个字节都不读**——
+  这条以前只管流，现在也管文件路径（`LoadOptions.MaxEncodedBytes` 的注释同步改了）。
+- 映射生命周期只有一次解码那么长，`using` 罩住整个解码（异步那条也罩住 `await`），
+  返回后文件句柄已释放（Windows 上可以立刻删除，有用例验证）。所以后端仍然不能把入参内存留在帧 / 元数据里。
+- 文件内容按需分页：解码器没碰到的页不会被读进来（`ImageSharp` 之类的"读全图"型解码器差别不大，
+  但 skip 型解码、超大文件只取元数据时省得很实在）。
+
+**没改的地方**：`Font.LoadFromFile` / Skia 的 `SKTypeface` 自备字体缓存仍是整份读入。
+字体字节要**跟着 Font 对象活到进程结束**（字形表是懒解析的），改映射就得让 `Font` 变成 `IDisposable`
+或给缓存加引用计数——那是公开 API 破坏，不在这次范围内。
+
+**用例**（核心 `EncodedBytesLimitTests`）：`Load_FilePath_Rejects_By_Length_Before_Decoding`（5000 字节文件 + 上限 100，
+报的 `EncodedBytes` 必须是真实文件长度）、`LoadAsync_FilePath_Rejects_By_Length_Before_Decoding`、
+`Load_FilePath_Rejects_Empty_File`（同步 / 异步都抛）、`Load_FilePath_Within_Limit_Reaches_The_Backend`（等于上限放行）、
+`Load_FilePath_Decodes_Real_Image_And_Releases_The_Handle`（Skia 真 PNG：映射内存直接解码 + 解完能删文件）；
+软后端另有 `Load_From_Path_Maps_File_And_Releases_It` / `LoadAsync_From_Path_Maps_File_And_Releases_It`（PNG 往返 + 句柄释放）。
+测试数 280 → **287**。

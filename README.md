@@ -50,6 +50,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 | **像素互操作** | `Bgra32` / `Bgr24` / `Rgb24` / `Gray8` 直接进出，支持任意 `stride`，不强制行连续 |
 | **原生句柄** | OpenCV 后端可拿底层 `Mat`：`SharedMat()` 共享、`SubMat()` 取 ROI 视图、`CloneMat()` 深拷贝（**内部是 BGRA**，见下文边界说明） |
 | **检测流水线** | letterbox + 坐标反算、NCHW/NHWC 张量化、池化缓冲、NMS、检测框与标签绘制 |
+| **加载** | `Load(path)` 走只读内存映射，不再 `File.ReadAllBytes` 出等长数组；文件长度在映射前就校验 |
 | **异步** | 加载 / 保存 / 编码有 `Async` 版本；绘制保持同步（微秒级，包一层 Task 只会更慢） |
 | **AOT** | 核心与软后端声明 `IsAotCompatible`，无反射、无动态代码生成 |
 
@@ -443,7 +444,27 @@ using var big = engine.Load(path, new LoadOptions { MaxPixels = 0 });
 - `ImageSizeLimitExceededException.Width` / `Height` / `MaxPixels` 给出当时的数值；
   它和"图损坏"是两类异常，方便映射成 413 与 400。
 - `ImageEngine.Create` / `FromPixels` 不受这个上限约束——那里的尺寸来自你的代码，不是外部输入。
-- 只限**像素数**，不限编码字节数：如果输入可能是超大文件流，请在喂给 `Load` 之前自己做长度检查。
+- 只限**像素数**：像素少但字节多的输入（高熵图片、被刻意放大的文件）由下面的字节上限管。
+
+### 编码字节上限（流式加载）
+
+`Load(Stream)` / `LoadAsync(Stream)` 读入的是**压缩后的字节**，这层有独立的开关
+`LoadOptions.MaxEncodedBytes`。**默认 `0` = 不限制**，保持与旧版本一致——现有调用方不会因为升级
+突然开始抛异常。
+
+```csharp
+// 只允许读入 8 MB 的编码数据；超出立刻停止读取并抛异常，不会把整个文件吞进内存
+using var image = engine.Load(httpStream, new LoadOptions { MaxEncodedBytes = 8 * 1024 * 1024 });
+```
+
+- 累计读到的字节数超过上限就**停手**（缓冲最多长到"上限 + 1"），异常里的
+  `MaxEncodedBytes` / `EncodedBytes` 给出上限与已读字节数；`Width` / `Height` / `MaxPixels` 为 0。
+- 可寻址流会先按 `Length` 快速拒绝；这个值不可信（网络流常常乱报），所以读循环里仍然累计校验。
+- `Load(path)` / `LoadAsync(path)` 走**只读内存映射**，长度在建立映射之前就知道，所以同样按这个上限**先拒后读**；
+  空文件抛 `ArgumentException`，超过单块缓冲上限（约 2 GB，span 长度是 `int`）也抛 `ImageSizeLimitExceededException`。
+- 已经拿到完整字节的 `Load(ReadOnlySpan<byte>)` / `Load(ReadOnlyMemory<byte>)` 不受它约束——
+  内存都已经分配过了，拦不住也没有意义。
+- 与 `MaxPixels` 是**两个独立维度**，各自挡一类输入，互不影响。
 
 ## 出错时
 
@@ -452,6 +473,7 @@ using var big = engine.Load(path, new LoadOptions { MaxPixels = 0 });
 | 参数非法 | `ArgumentException` / `ArgumentOutOfRangeException` |
 | 后端不支持该能力 | `FeatureNotSupportedException`（含后端名、能力名、替代建议） |
 | 图像超过 `LoadOptions.MaxPixels` | `ImageSizeLimitExceededException` |
+| 流读入超过 `LoadOptions.MaxEncodedBytes` | `ImageSizeLimitExceededException`（`Width` / `Height` 为 0） |
 | 保存到文件失败 | `ImageSaveFailedException`（含 `Path`、`FileDeleted`，半截文件已删除） |
 | 三方库内部失败 | `ImageBackendException`（保留 `InnerException`，含后端名） |
 | 原生库缺失 | `ImageBackendException`（含安装提示，不是裸 `DllNotFoundException`） |

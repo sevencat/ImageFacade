@@ -154,6 +154,12 @@ public abstract class ImageBackendBase : IImageBackend
         return false;
     }
 
+    /// <summary>
+    /// 切片版：默认把切片复制成 string 后转调上面那个重载，所以只重写了 string 版的派生类行为不变。
+    /// </summary>
+    public virtual bool TryMeasureText(IFrame frame, ReadOnlySpan<char> text, in TextStyle style, out TextMetrics metrics)
+        => TryMeasureText(frame, new TextSpec(new string(text), PointF.Empty, style), out metrics);
+
     public virtual bool TryAcquirePixels(IFrame frame, out PixelLease lease)
     {
         lease = default;

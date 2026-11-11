@@ -316,17 +316,24 @@ public sealed class SkiaBackend : IImageBackend
     }
 
     public bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
+        => TryMeasureTextCore(spec.Style, spec.Text.AsSpan(), out metrics);
+
+    /// <summary>切片版：<c>SKFont.MeasureText(ReadOnlySpan&lt;char&gt;)</c> 直接吃切片，折行时不再为每个候选分配 string。</summary>
+    public bool TryMeasureText(IFrame frame, ReadOnlySpan<char> text, in TextStyle style, out TextMetrics metrics)
+        => TryMeasureTextCore(style, text, out metrics);
+
+    private bool TryMeasureTextCore(TextStyle style, ReadOnlySpan<char> text, out TextMetrics metrics)
     {
         try
         {
-            SKTypeface typeface = ResolveTypeface(spec.Style.Font);
-            using var font = new SKFont(typeface, spec.Style.Size);
+            SKTypeface typeface = ResolveTypeface(style.Font);
+            using var font = new SKFont(typeface, style.Size);
             SKFontMetrics fontMetrics = font.Metrics;
             float ascent = MathF.Abs(fontMetrics.Ascent);
             float descent = MathF.Abs(fontMetrics.Descent);
             float leading = MathF.Max(0f, fontMetrics.Leading);
 
-            metrics = new TextMetrics(font.MeasureText(spec.Text), ascent, descent, leading);
+            metrics = new TextMetrics(font.MeasureText(text), ascent, descent, leading);
             return true;
         }
         catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)

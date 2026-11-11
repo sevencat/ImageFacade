@@ -1,4 +1,5 @@
-﻿using ImageFacade.SkiaSharp;
+﻿using ImageFacade.Backends;
+using ImageFacade.SkiaSharp;
 using Xunit;
 
 namespace ImageFacade.Tests;
@@ -8,6 +9,32 @@ public sealed class SkiaBackendTests
 {
     private static ImageEngine CreateEngine()
         => new(new SkiaBackend());
+
+    /// <summary>
+    /// 折行用的切片版测量必须与 string 版逐字节一致（<c>SKFont.MeasureText(ReadOnlySpan&lt;char&gt;)</c>
+    /// 与 string 重载走同一段 Skia 代码），否则省下的分配会换来不同的折行位置。
+    /// </summary>
+    [Fact]
+    public void MeasureText_Slice_Overload_Matches_String_Overload()
+    {
+        using var backend = new SkiaBackend();
+        using IFrame frame = backend.Create(8, 8, null);
+
+        var style = new TextStyle { Font = FontRef.BuiltIn, Size = 24 };
+        string[] samples = ["Wg文字", "中文 Ab", "a", "W", "A😀b", "abcdefghij"];
+
+        foreach (string text in samples)
+        {
+            var spec = new TextSpec(text, PointF.Empty, style);
+            Assert.True(backend.TryMeasureText(frame, in spec, out TextMetrics fromString));
+            Assert.True(backend.TryMeasureText(frame, text.AsSpan(), in style, out TextMetrics fromSlice));
+
+            Assert.Equal(fromString.Width, fromSlice.Width);
+            Assert.Equal(fromString.Ascent, fromSlice.Ascent);
+            Assert.Equal(fromString.Descent, fromSlice.Descent);
+            Assert.Equal(fromString.LineGap, fromSlice.LineGap);
+        }
+    }
 
     [Fact]
     public void Create_And_GetPixel_RoundTrips()

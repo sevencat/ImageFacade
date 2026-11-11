@@ -232,7 +232,7 @@ internal class FakeBackend : IImageBackend
         return true;
     }
 
-    public bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
+    public virtual bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
     {
         if (!SupportsText)
         {

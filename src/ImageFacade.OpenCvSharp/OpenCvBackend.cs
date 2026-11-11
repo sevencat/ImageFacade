@@ -440,11 +440,18 @@ public sealed class OpenCvBackend : IImageBackend
     }
 
     public bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
+        => TryMeasureTextCore(spec.Style, spec.Text.AsSpan(), out metrics);
+
+    /// <summary>切片版：托管字体栈的 <see cref="Font.Measure(ReadOnlySpan{char}, float)"/> 逐码点累加，直接吃切片。</summary>
+    public bool TryMeasureText(IFrame frame, ReadOnlySpan<char> text, in TextStyle style, out TextMetrics metrics)
+        => TryMeasureTextCore(style, text, out metrics);
+
+    private bool TryMeasureTextCore(TextStyle style, ReadOnlySpan<char> text, out TextMetrics metrics)
     {
         Font font;
         try
         {
-            font = spec.Style.FontFace ?? ResolveFont(spec.Style.Font);
+            font = style.FontFace ?? ResolveFont(style.Font);
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or ArgumentException)
         {
@@ -452,13 +459,13 @@ public sealed class OpenCvBackend : IImageBackend
             return false;
         }
 
-        float size = spec.Style.Size;
+        float size = style.Size;
         float ascent = font.GetAscent(size);
         float descent = MathF.Abs(font.GetDescent(size));
         float lineHeight = font.GetLineHeight(size);
         float gap = MathF.Max(0f, lineHeight - ascent - descent);
 
-        metrics = new TextMetrics(font.Measure(spec.Text, size), ascent, descent, gap);
+        metrics = new TextMetrics(font.Measure(text, size), ascent, descent, gap);
         return true;
     }
 

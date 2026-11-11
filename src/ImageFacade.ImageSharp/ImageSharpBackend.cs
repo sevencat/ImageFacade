@@ -405,15 +405,22 @@ public sealed class ImageSharpBackend : IImageBackend
     }
 
     public bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
+        => TryMeasureTextCore(spec.Style, spec.Text.AsSpan(), out metrics);
+
+    /// <summary>切片版：<c>TextMeasurer.MeasureAdvance(ReadOnlySpan&lt;char&gt;, …)</c> 直接吃切片，折行时不再为每个候选分配 string。</summary>
+    public bool TryMeasureText(IFrame frame, ReadOnlySpan<char> text, in TextStyle style, out TextMetrics metrics)
+        => TryMeasureTextCore(style, text, out metrics);
+
+    private bool TryMeasureTextCore(TextStyle style, ReadOnlySpan<char> text, out TextMetrics metrics)
     {
         try
         {
-            SixFont font = ResolveFont(spec.Style.Font, spec.Style.Size);
+            SixFont font = ResolveFont(style.Font, style.Size);
             var options = new SixTextOptions(font) { Dpi = 72f, WrappingLength = -1f };
-            SixFontRectangle advance = SixTextMeasurer.MeasureAdvance(spec.Text, options);
+            SixFontRectangle advance = SixTextMeasurer.MeasureAdvance(text, options);
 
             SixFontMetrics fontMetrics = font.FontMetrics;
-            float scale = fontMetrics.UnitsPerEm > 0 ? spec.Style.Size / fontMetrics.UnitsPerEm : 1f;
+            float scale = fontMetrics.UnitsPerEm > 0 ? style.Size / fontMetrics.UnitsPerEm : 1f;
             SixHorizontalMetrics horizontal = fontMetrics.HorizontalMetrics;
 
             float ascent = horizontal.Ascender * scale;
@@ -422,7 +429,7 @@ public sealed class ImageSharpBackend : IImageBackend
 
             if (ascent <= 0f || descent <= 0f)
             {
-                (ascent, descent) = FallbackMetrics(spec.Style.Size);
+                (ascent, descent) = FallbackMetrics(style.Size);
             }
 
             metrics = new TextMetrics(advance.Width, ascent, descent, lineGap);
