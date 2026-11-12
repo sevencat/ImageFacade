@@ -51,6 +51,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 | **原生句柄** | OpenCV 后端可拿底层 `Mat`：`SharedMat()` 共享、`SubMat()` 取 ROI 视图、`CloneMat()` 深拷贝（**内部是 BGRA**，见下文边界说明） |
 | **检测流水线** | letterbox + 坐标反算、NCHW/NHWC 张量化、池化缓冲、NMS、检测框与标签绘制 |
 | **加载** | `Load(path)` 走只读内存映射，不再 `File.ReadAllBytes` 出等长数组；文件长度在映射前就校验 |
+| **一行加载 / 保存** | 设置一次 `ImageEngine.Default` 后 `ImageLoader.LoadJpg("in.jpg")` 直接加载，`img.SaveJpg("out.png")` 直接保存——**不用手写格式**，见 [一行加载 / 保存](#一行加载--保存推荐入口) |
 | **半透明检测** | 加载时顺手查一次"图里真有半透明像素吗"（`HasTransparency`）；可关掉、也可自己按需重算；图本来就不透明时不需要任何额外操作，保存时不会重复扫描，JPEG / BMP 编码还能省掉合成背景 |
 | **异步** | 加载 / 保存 / 编码有 `Async` 版本；绘制保持同步（微秒级，包一层 Task 只会更慢） |
 | **AOT** | 核心与软后端声明 `IsAotCompatible`，无反射、无动态代码生成 |
@@ -204,6 +205,35 @@ image.Save("out.png", new SaveOptions { CompressionLevel = 6 });
 using var engine = new ImageEngine(new OpenCvBackend());
 using var engine = new ImageEngine(new SoftwareBackend());    // 纯托管，无原生依赖（编解码要先注册，见上）
 ```
+
+## 一行加载 / 保存（推荐入口）
+
+**日常用图不要手写格式**：启动时把引擎赋给 `ImageEngine.Default` 一次，之后加载用 `ImageLoader.LoadXxx`、保存 / 编码用 `img.SaveXxx` / `img.EncodeXxx`，格式写进方法名里：
+
+```csharp
+// 程序启动时设置一次（门面不做任何自动探测，不设置就抛 InvalidOperationException）
+ImageEngine.Default = new ImageEngine(new SkiaBackend());
+
+// 加载：格式写在方法名里，不用构造 LoadOptions / SaveOptions
+using var img = ImageLoader.LoadJpg("in.jpg");
+
+// 保存 / 编码：同样不用手写 SaveOptions.Format
+img.SaveJpg("out.jpg", 85);          // 有损质量 85
+img.SavePng("out.png");              // 无损
+byte[] webp = img.EncodeWebP(75);    // 拿字节
+
+// 异步一样是一行
+using var png = await ImageLoader.LoadPngAsync("in.png", cancellationToken: token);
+await img.SavePngAsync("out.png", cancellationToken: token);
+```
+
+三条约定：
+
+1. **`ImageLoader` 全部走 `ImageEngine.Default`**，与 `engine.Load(...)` 是同一个引擎、同一套校验（尺寸上限、内存映射、`HasTransparency` 检测）；没有 Default 就抛 `InvalidOperationException`，消息里告诉你怎么赋值。多引擎并存时仍用 `engine.Load`，`ImageLoader` 只是单引擎程序的便捷入口。
+2. **加载按内容嗅探，不认扩展名**：`LoadJpg` / `LoadPng` 这些名字是为了调用处可读，文件实际是什么格式就按什么格式解——扩展名写错了照样能加载。
+3. **保存格式由方法名定死**：`SaveJpg` 永远出 JPEG（不需要目标路径扩展名是 `.jpg`），`SavePng` 永远出 PNG；错误语义（半截文件删除、`ImageSaveFailedException`、`FeatureNotSupportedException`）与 `Save` / `Encode` 完全一致。
+
+支持的格式：JPEG（`LoadJpg` / `SaveJpg`）、PNG、WebP、BMP、GIF、TIFF、ICO、QOI、PNM，每种都有 `path` / `Stream` / `byte[]` 三个入参方向和对应的 `Async` / `Encode` 版本。当然，**后端得支持该格式**（能力矩阵见下文），不支持时照抛 `FeatureNotSupportedException`。
 
 ## 截图
 

@@ -3,7 +3,7 @@
   <PropertyGroup>
     <!-- 独立版本线：核心包自己的版本，与各后端解耦。patch/minor 不破坏公开 API（前向兼容），
          后端包依赖它时用下界，因此核心兼容升级后后端不需要重发。见 README「版本与兼容」。 -->
-    <Version>0.3.0</Version>
+    <Version>0.3.1</Version>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade</AssemblyName>
     <RootNamespace>ImageFacade</RootNamespace>
