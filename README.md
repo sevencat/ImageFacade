@@ -58,19 +58,19 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 
 ## 安装
 
-七个包都已发布到 [nuget.org](https://www.nuget.org/packages/Sevencat.ImageFacade)，当前版本 `0.4.0`。
+七个包都已发布到 [nuget.org](https://www.nuget.org/packages/Sevencat.ImageFacade)，当前版本 `0.5.0`。
 
 ```xml
 <!-- 核心包永远要引，再按需加一个后端 -->
-<PackageReference Include="Sevencat.ImageFacade" Version="0.4.0" />
-<PackageReference Include="Sevencat.ImageFacade.SkiaSharp" Version="0.4.0" />
+<PackageReference Include="Sevencat.ImageFacade" Version="0.5.0" />
+<PackageReference Include="Sevencat.ImageFacade.SkiaSharp" Version="0.5.0" />
 ```
 
 后端包已带上对应三方库的依赖，不需要重复声明 `SkiaSharp` / `OpenCvSharp4` / `SixLabors.ImageSharp`。
 
 ### 版本与兼容
 
-**每个包独立发版**，不强制"七个包同进同退"（`0.4.0` 是当前七个包统一的基线，此前的软后端曾单独走 `0.1.x`）：
+**每个包独立发版**，不强制"七个包同进同退"（`0.5.0` 是当前七个包统一的基线，此前的软后端曾单独走 `0.1.x`）：
 
 | 包 | 版本线 |
 |---|---|
@@ -83,7 +83,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 2. **核心前向兼容时，后端不用重发**：核心只做"加 API / 修 bug"的兼容改动时，把它升到更高的 `X.Y.Z+n`，现有后端包照常工作；只有核心做了不兼容改动（升主版本）才需要后端重新发版对齐。
 3. **只升后端也安全**：后端只用到核心的旧 API，升级某个后端不会连累核心。
 
-各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.4.0"` 是当前统一基线的取值。
+各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.5.0"` 是当前统一基线的取值。
 
 | 包 | 后端类 | 三方库 | 说明 |
 |---|---|---|---|
