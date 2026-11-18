@@ -22,6 +22,7 @@ internal sealed class FrameComposer : IDisposable
         Color = Rgba32.White,
     };
 
+    //这个就是用来做处理的。尺寸大小变化 时重建
     private FacadeImage? _canvas;
 
     public void Compose(

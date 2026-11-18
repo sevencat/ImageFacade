@@ -762,14 +762,6 @@ dotnet run --project samples/ImageFacade.AvaloniaDemo -- --open D:\clips\demo.mp
 # --shot D:\out\ui.png 则连窗口一起截（RenderTargetBitmap），用于验证界面
 ```
 
-### 原生后端对照：`samples/ImageFacade.AvaloniaNativeDemo`
-
-同一份解码与 HUD 合成代码（直接链接 `VideoPlayer.cs` / `FrameComposer.cs`，没有复制），只把 `UseSimdSkiaDesktop()` 换成官方的 `UsePlatformDetect()`，用来判断某个现象到底出在 ImageFacade 还是出在渲染后端。
-
-```powershell
-dotnet run --project samples/ImageFacade.AvaloniaNativeDemo -- --open D:\clips\demo.mp4
-```
-
 ### 内存：链路侧零分配，曲线是窄幅锯齿
 
 **播放过程中不会反复分配大内存。** 整条链路只有三处持有像素，每处都只建一次：
@@ -797,7 +789,7 @@ SimdSkia 在这条链路里的好处很直接：
 - **没有原生 DLL**：不引 `SkiaSharp` / `SkiaSharp.NativeAssets.*`，纯托管，`dotnet publish` 出来就是全部，部署与 AOT 都省事。
 - **波动可预期**：链路上的分配是 0，渲染侧的量级固定，所以内存曲线稳定在几十 MB 的窄带里，不随时长增长。
 
-如果连每帧那次纹理提交也想省掉，可以换官方 Skia 后端跑**同一份代码**（`samples/ImageFacade.AvaloniaNativeDemo`）：它直接复用位图内存，实测 960×720、60 秒托管堆 12.5 MB 恒定、LOH 10.5 MB（就是那 4 块帧池）、分配 0.2 MB/s、GC 1 次；SimdSkia 这条路上托管堆在 70~90 MB 来回、分配约 70 MB/s（就是上面那次 35 秒采样）。差别全在绘制路径，解码和合成一行没改——**要零原生依赖 + AOT 选 SimdSkia，要极致的托管内存曲线选官方后端**，这正是把渲染后端做成可替换的意义。
+如果连每帧那次纹理提交也想省掉，把 `UseSimdSkiaDesktop()` 换成官方的 `UsePlatformDetect()` 即可：解码、HUD 合成、写位图一行都不用改，官方 Skia 后端直接复用位图内存。早期用同一份代码对照测过（960×720、60 秒）：托管堆 12.5 MB 恒定、LOH 10.5 MB（就是那 4 块帧池）、分配 0.2 MB/s、GC 1 次；而 SimdSkia 这条路上托管堆在 70~90 MB 来回、分配约 70 MB/s（就是上面那次 35 秒采样）。差别全在绘制路径——**要零原生依赖 + AOT 选 SimdSkia，要极致的托管内存曲线选官方后端**，这正是把渲染后端做成可替换的意义。
 
 **还能再省一次拷贝。** 现在每帧要搬两遍全帧：帧池 → 画布（`ImportPixels`）、画布 → `WriteableBitmap`（`CopyPixelsTo`）。第一遍其实是白搬的：如果让画布直接落在帧池那块内存上（一张图只创建一次，之后每帧只是同一块内存换了内容），HUD 就画在解码输出上，最后只剩 `CopyPixelsTo` 这一趟。960×720 一帧 2.6 MB，15 fps 下等于少搬约 39 MB/s。
 
@@ -817,7 +809,6 @@ src/
 tests/                             # 一后端一测试工程，共享测试源码
 samples/ImageFacade.Samples/       # 示例 + README 截图生成器
 samples/ImageFacade.AvaloniaDemo/  # Avalonia + SimdSkia + FFmpeg.AutoGen 播放器
-samples/ImageFacade.AvaloniaNativeDemo/  # 同一份逻辑换官方 Avalonia 后端，用于对照
 docs/images/                       # 截图
 ```
 
