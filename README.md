@@ -733,14 +733,14 @@ dotnet run --project samples/ImageFacade.AvaloniaDemo -- --decode-check D:\clips
 上图是点「播放 RTMP 流」后截的窗口：那个按钮直接打开 `rtmp://liteavapp.qcloud.com/live/liteavdemoplayerstreamid`（腾讯云直播的公开 demo 源）。网络源和本地文件走同一条解码路径，唯一的多余设置是给 `avformat_open_input` 传 `rw_timeout`（5 秒），否则服务器不可达时解码线程会卡在 `av_read_frame` 里退不出来。
 
 - 界面在 `MainWindow.axaml`，逻辑在 `MainWindow.axaml.cs`。
-- 后台解码线程按 PTS 节流产出直通 RGBA32 帧，UI 线程用 `DispatcherTimer` 取最新帧写入 `WriteableBitmap`；分辨率变化时重建位图。
-- HUD 在 `FrameComposer` 里用核心光栅完成：画布按尺寸建一次，之后每帧 `ImportPixels` → `FillRectangle` / `DrawText` → `CopyPixelsTo(framebuffer.Address, framebuffer.RowBytes, Rgba32)`，直接写进 `WriteableBitmap` 的像素内存。
+- 后台解码线程按 PTS 节流，`sws_scale` 直接把 YUV 转成预乘 Rgba32 写进帧池里那块 `FacadeImage` 的画布缓冲；UI 线程用 `DispatcherTimer` 取最新帧，`CopyPixelsTo` 写进 `WriteableBitmap`；分辨率变化时重建位图与帧池。
+- HUD 在 `FrameComposer` 里用核心光栅完成：帧本身就是画布，`FillRectangle` / `DrawText` 直接画在解码输出上，再 `CopyPixelsTo(framebuffer.Address, framebuffer.RowBytes, Rgba32)` 写进 `WriteableBitmap` —— 每帧只有这一趟全帧搬运。
 - 窗口底部显示当前尺寸与播放时间。
 - 根容器必须给一个**不透明的 `Background`**。这跟渲染后端无关：Avalonia 12.1.5 在「窗口背景不透明 + 根 Panel 的 `Background` 为 `null` 或 `Transparent`」时，`Button` 这类带模板的控件会整块不绘制（官方 Skia 后端同样复现），`TextBlock`、`Border` 不受影响。给个不透明色即可，`Transparent` 不管用。
 
 ### 一帧的旅程：FFmpeg → ImageFacade → SimdSkia
 
-整条链路只有**一次像素格式转换**（`sws_scale`）和**一次跨线程交接**（换引用），中间不经过任何 `Bitmap` / `SKBitmap` / `byte[]` 的额外拷贝：
+整条链路只有**一次像素格式转换**（`sws_scale`）、**一次跨线程交接**（换引用）和**一次全帧搬运**（写进位图），中间不经过任何 `Bitmap` / `SKBitmap` / `byte[]` 的额外拷贝：
 
 ```text
 FFmpeg 解码线程（VideoPlayer.Run）              UI 线程（DispatcherTimer，15 ms）
@@ -748,49 +748,52 @@ FFmpeg 解码线程（VideoPlayer.Run）              UI 线程（DispatcherTime
 av_read_frame → packet
   → avcodec_send_packet / receive_frame
   → AVFrame（yuv420p / nv12 …）
-  → sws_scale → 直通 RGBA32
-  → 帧池 byte[]（4 块，首帧按分辨率建满）
+  → RentFrame：从帧池借一块 FacadeImage
+  → sws_scale 直写它的画布缓冲（预乘 Rgba32）
         │
         │  _pending 换引用（不拷贝）
         └────────── TryTakeFrame ──────────────►  WriteableBitmap.Lock()
                                                    → ILockedFramebuffer.Address
-                                                   → ImportPixels（直通 → 内部预乘）
-                                                   → FillRectangle + DrawText（HUD）
-                                                   → CopyPixelsTo(Address)（写回位图）
+                                                   → FillRectangle + DrawText（HUD 就地画）
+                                                   → CopyPixelsTo(Address)（预乘 → 直通）
                                                    → InvalidateVisual()
-                        ◄────── ReturnFrame ──────  （缓冲还给池）
+                        ◄────── ReturnFrame ──────  （帧还给池，下轮被 sws 覆盖）
 ```
 
 | 步骤 | 谁在做 | 每帧的代价 |
 |---|---|---|
-| 解码 + `sws_scale` 成 RGBA | FFmpeg 原生库 | 一次整帧转换，写进池里的缓冲 |
-| 交接 `byte[]` | `VideoPlayer` | 换引用，0 拷贝 |
+| 解码 + `sws_scale` 成 RGBA | FFmpeg 原生库 | 一次整帧转换，直接写进池里那块画布 |
+| 交接 `FacadeImage` | `VideoPlayer` | 换引用，0 拷贝 |
 | `Lock()` 拿位图内存 | Avalonia / SimdSkia | 0 拷贝，直接给出像素地址 |
-| `ImportPixels` | ImageFacade 光栅 | 一次直通 → 预乘转换（同一块内存） |
-| HUD（矩形 + 两行字） | ImageFacade 光栅 | 微秒级 |
-| `CopyPixelsTo(Address)` | ImageFacade 光栅 | 一次预乘 → 直通写回位图 |
+| HUD（矩形 + 两行字） | ImageFacade 光栅 | 微秒级，就地改画布 |
+| `CopyPixelsTo(Address)` | ImageFacade 光栅 | 一次预乘 → 直通写回位图，全帧唯一的一次搬运 |
 | 上屏 | SimdSkia | 位图提交为纹理（后端内部） |
 
-两个关键点：
+三个关键点：
 
-1. **缓冲归谁、什么时候建**：帧池 4 块在首帧一次建满，UI 来不及取时旧帧直接丢弃（`RentBuffer` 返回 `null`），池不会增长，也不会堆积延迟。
-2. **画布与位图都只建一次**：分辨率变化才重建。`ImportPixels` / `CopyPixelsTo` 都在覆盖同一块内存，所以每帧没有 `new`。
+1. **分配只发生在拿到一个新尺寸的第一帧**：帧池按当前分辨率一次建满（`PoolSize` 块），此后每帧只是把池里的帧借出、写满、换引用、归还，链路侧不再 `new` 任何像素缓冲。
+2. **帧池的作用是跳帧，不是攒帧**：解码比 UI 快时（直播 / 高帧率源），池里没有空闲帧就让 `RentFrame` 返回 `null`，这一帧**连 `sws_scale` 都不进**，直接丢掉——省掉缩放开销，也不会越积越多把延迟越拉越大。
+3. **画布和位图都只建一次**：分辨率变化才重建。`CopyPixelsTo` 覆盖位图的同一块内存，所以每帧没有 `new`。
 
 ### 保存一帧：两条路，选一条
 
-「保存图片」按钮取的是**当前这一帧 `FacadeImage`**（视频画面 + HUD 都在上面），有两种存法：
+「保存图片」按钮保存的是**当前显示的画面**（视频 + HUD）。不能直接存帧池里那张 `FacadeImage`：UI 渲染完就把它归还了，解码线程随时会用下一帧覆盖。所以取的是已经 `CopyPixelsTo` 进 `WriteableBitmap` 的那一份，有两种存法：
 
-**A. Sdcb 软后端（demo 里用的这条）**——渲染和保存共用一个 `SoftwareBackend` 引擎：
+**A. Sdcb 软后端（demo 里用的这条）**——把位图导回一张软后端画布再编码：
 
 ```csharp
 // 启动时注册一次 PNG
 ImageBackendBase.RegisterCodec(ImageFormat.Png, PngImageDecoder.Registration, PngImageEncoder.Registration);
 
 using var engine = new ImageEngine(new SoftwareBackend());
-FacadeImage canvas = engine.Create(width, height, Rgba32.Black);
-// …每帧 ImportPixels + 画 HUD…
+FacadeImage canvas = engine.Create(width, height, Rgba32.Black);   // 只建一次，且只在保存时用
+
+using ILockedFramebuffer fb = bitmap.Lock();
+canvas.ImportPixels(new ReadOnlySpan<byte>((void*)fb.Address, fb.RowBytes * height), fb.RowBytes);
 canvas.SavePng("frame.png");       // 直接编码，不需要中转缓冲
 ```
+
+这张画布**不参与逐帧渲染**（渲染用的是帧池里那块），只在保存时把画面搬进来一次。
 
 `SoftwareBackend` 的绘制 / 像素读写由 `ImageBackendBase` 直接转给核心光栅，和 `new ImageEngine()` 是同一份实现；编解码则挂在这个后端上。所以**画布自己就能存**，不必"核心光栅画、另一个引擎存"那样搬一次像素。编码时内部只从 `PixelBufferPool`（4 MiB 上限）租一次缓冲，960×720（2.7 MB）能命中复用。
 
@@ -799,7 +802,7 @@ canvas.SavePng("frame.png");       // 直接编码，不需要中转缓冲
 | | A. Sdcb 软后端 | B. Avalonia `Bitmap.Save` |
 |---|---|---|
 | 额外依赖 | `ImageFacade.SdcbSimdCodecs` + `Sdcb.SimdCodecs.Png` | 无 |
-| 数据来源 | `FacadeImage` 像素 | `WriteableBitmap` 像素 |
+| 数据来源 | `WriteableBitmap` 像素（导入画布后编码） | `WriteableBitmap` 像素 |
 | 可控项 | `SaveOptions`（压缩级别 / 元数据），可换 JPEG / WebP / BMP… | 只有后端默认值 |
 | 不注册 codec 时 | `Load` / `Save` 抛 `FeatureNotSupportedException` | 照常可用 |
 
@@ -814,15 +817,15 @@ dotnet run --project samples/ImageFacade.AvaloniaDemo -- --open D:\clips\demo.mp
 
 ### 内存：链路侧零分配，曲线是窄幅锯齿
 
-**播放过程中不会反复分配大内存。** 整条链路只有三处持有像素，每处都只建一次：
+**播放过程中不分配像素缓冲。** 唯一的分配点是「拿到一个新尺寸的第一帧」：帧池按该分辨率一次建满 `PoolSize` 块 `FacadeImage`，之后每帧只是借出、写满、换引用、归还：
 
 | 环节 | 创建时机 | 之后每帧做什么 |
 |---|---|---|
-| 解码帧池（4 块 `byte[]`） | 首帧按分辨率一次建满 | 取帧 / 归还只换引用，不 `new`、不复制 |
-| ImageFacade 画布 | 分辨率变化时 `Create` | `ImportPixels` 覆盖同一块内存，HUD 画在上面 |
+| 帧池（`PoolSize` 块 `FacadeImage`） | 新分辨率的首帧，一次建满 | 借出 → `sws_scale` 覆盖写 → 换引用 → 归还；不 `new`、不复制 |
 | `WriteableBitmap` | 分辨率变化时 `new` | `Lock()` 后由 `CopyPixelsTo` 直接写进去 |
+| 保存用的软后端画布（`FrameComposer`） | 第一次保存时 `Create` | 只在保存时 `ImportPixels` 一次，与逐帧路径无关 |
 
-这三处就是每帧会走过的全部路径，全都是复用。960×720、约 30 fps 连跑 35 秒（`--mem` 每 2 秒采一行）：
+前两项就是每帧会走过的全部路径。960×720、约 30 fps 连跑 35 秒（`--mem` 每 2 秒采一行）：
 
 | 指标 | 采样区间 |
 |---|---|
@@ -841,9 +844,20 @@ SimdSkia 在这条链路里的好处很直接：
 
 如果连每帧那次纹理提交也想省掉，把 `UseSimdSkiaDesktop()` 换成官方的 `UsePlatformDetect()` 即可：解码、HUD 合成、写位图一行都不用改，官方 Skia 后端直接复用位图内存。早期用同一份代码对照测过（960×720、60 秒）：托管堆 12.5 MB 恒定、LOH 10.5 MB（就是那 4 块帧池）、分配 0.2 MB/s、GC 1 次；而 SimdSkia 这条路上托管堆在 70~90 MB 来回、分配约 70 MB/s（就是上面那次 35 秒采样）。差别全在绘制路径——**要零原生依赖 + AOT 选 SimdSkia，要极致的托管内存曲线选官方后端**，这正是把渲染后端做成可替换的意义。
 
-**还能再省一次拷贝。** 现在每帧要搬两遍全帧：帧池 → 画布（`ImportPixels`）、画布 → `WriteableBitmap`（`CopyPixelsTo`）。第一遍其实是白搬的：如果让画布直接落在帧池那块内存上（一张图只创建一次，之后每帧只是同一块内存换了内容），HUD 就画在解码输出上，最后只剩 `CopyPixelsTo` 这一趟。960×720 一帧 2.6 MB，15 fps 下等于少搬约 39 MB/s。
+### 池开多大：跳帧还是单帧复用
 
-这条路眼下还没接通：`ImageEngine.FromPixels(ptr, ..., wrap: true)` 需要后端实现 `TryWrapPixels` 才真正零拷贝，而现有后端（软光栅 / Skia / ImageSharp / OpenCV）一律返回 `false`（内部是预乘或 BGRA，接不了直通 RGBA），现在调它只会退化成一次导入，白忙。要真省掉这趟搬运，得先让软光栅的画布支持零拷贝接管。
+`PoolSize`（示例里是 4）只决定「同时允许多少帧在飞」，不影响正确性，只影响丢帧策略和内存峰值（每块 ≈ `width × height × 4`）。两种典型场景正好是它的两端：
+
+**接收比处理快（直播、高帧率源）→ 池用来跳帧。** 解码线程一直在产出，UI 按定时器取；池里没有空闲帧时 `RentFrame` 返回 `null`，这一帧**连 `sws_scale` 都不进**就丢掉。所以：
+
+- 池开 4：UI 偶尔慢一两帧能兜住，画面更平滑；
+- 池开 2 甚至 1：更激进地丢帧，最贵的那步缩放直接省掉，只保证「显示的是最新解出来的那帧」——直播通常要的就是这个，延迟比帧率重要。
+
+丢帧发生在缩放**之前**，这点很关键：`sws_scale` 是链路上最贵的一步（1080p 一帧几毫秒），设备跟不上时先把它省掉，才可能靠跳帧稳住。
+
+**接收比处理慢（本地文件、离线渲染）→ 池退化成单帧复用。** 池开 1 时链路就是「生产-消费」握手：解码线程借走唯一那块、写完交出去，UI 拿走渲染、`CopyPixelsTo` 完成后归还，下一帧再借同一块。从头到尾同一块内存被反复覆盖，没有第二份缓冲，也不会丢帧。
+
+**剩下唯一一次全帧搬运是 `CopyPixelsTo`。** 帧池 → 画布那一趟已经没有了（帧本身就是画布），现在每帧只把画布写进 `WriteableBitmap`。这趟省不掉：Avalonia 的 `WriteableBitmap` 不接受外部内存，只能往里拷。真要再少一次，就得跳过位图、把帧直接交给渲染后端（例如把 `FacadeImage` 的缓冲包成纹理上传），那是另一条路，示例没走。
 
 ## 项目结构
 

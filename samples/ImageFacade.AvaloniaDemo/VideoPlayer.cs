@@ -10,7 +10,10 @@ namespace ImageFacade.AvaloniaDemo;
 /// </summary>
 internal sealed unsafe class VideoPlayer : IDisposable
 {
-    /// <summary>帧池的固定容量：一次性按当前分辨率建满，此后只做整块替换，不扩容。</summary>
+    /// <summary>
+    /// 帧池的固定容量：一次性按当前分辨率建满，此后只做整块替换，不扩容。
+    /// 池满就丢帧（且丢在 sws_scale 之前）；调成 1 会退化成「单帧反复覆盖」。
+    /// </summary>
     private const int PoolSize = 4;
 
     private readonly object _gate = new();
