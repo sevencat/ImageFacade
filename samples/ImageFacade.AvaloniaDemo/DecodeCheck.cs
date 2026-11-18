@@ -41,7 +41,7 @@ internal static class DecodeCheck
 
             while (clock.Elapsed < TimeSpan.FromSeconds(30) && frames < 150)
             {
-                if (!player.TryTakeFrame(out byte[] pixels, out int width, out int height, out TimeSpan position))
+                if (!player.TryTakeFrame(out FacadeImage? frame, out int width, out int height, out TimeSpan position))
                 {
                     if (player.Error is { } error)
                     {
@@ -62,7 +62,7 @@ internal static class DecodeCheck
                         sizes.Add(size);
                     }
 
-                    if (HasVisiblePixels(pixels))
+                    if (HasVisiblePixels(frame))
                     {
                         visible++;
                     }
@@ -74,7 +74,7 @@ internal static class DecodeCheck
                 }
                 finally
                 {
-                    player.ReturnFrame(pixels);
+                    player.ReturnFrame(frame);
                 }
             }
 
@@ -112,7 +112,7 @@ internal static class DecodeCheck
 
         while (clock.Elapsed < TimeSpan.FromSeconds(20) && composed < 150)
         {
-            if (!player.TryTakeFrame(out byte[] pixels, out int width, out int height, out TimeSpan position))
+            if (!player.TryTakeFrame(out FacadeImage? frame, out int width, out int height, out TimeSpan position))
             {
                 if (player.Error is { } error)
                 {
@@ -131,7 +131,7 @@ internal static class DecodeCheck
                 try
                 {
                     long before = GC.GetAllocatedBytesForCurrentThread();
-                    composer.Compose(pixels, width, height, target, stride, position, 59.9);
+                    composer.Compose(frame, target, stride, position, 59.9);
                     long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
                     composed++;
@@ -154,7 +154,7 @@ internal static class DecodeCheck
             }
             finally
             {
-                player.ReturnFrame(pixels);
+                player.ReturnFrame(frame);
             }
         }
 
@@ -180,14 +180,24 @@ internal static class DecodeCheck
         return bright;
     }
 
-    private static bool HasVisiblePixels(byte[] pixels)
+    private static bool HasVisiblePixels(FacadeImage frame)
     {
-        // 抽样 1/64 的像素，只要有明显非黑就算通过
-        for (int i = 0; i + 3 < pixels.Length; i += 64 * 4)
+        if (!frame.TryGetRasterBuffer(out byte[] pixels, out int stride))
         {
-            if (pixels[i] > 16 || pixels[i + 1] > 16 || pixels[i + 2] > 16)
+            return false;
+        }
+
+        // 每 8 行 / 每 8 列取一个像素，只要有明显非黑就算通过
+        for (int y = 0; y < frame.Height; y += 8)
+        {
+            int row = y * stride;
+            for (int x = 0; x < frame.Width; x += 8)
             {
-                return true;
+                int i = row + (x * 4);
+                if (pixels[i] > 16 || pixels[i + 1] > 16 || pixels[i + 2] > 16)
+                {
+                    return true;
+                }
             }
         }
 

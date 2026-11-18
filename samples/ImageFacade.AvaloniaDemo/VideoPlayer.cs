@@ -1,25 +1,30 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using FFmpeg.AutoGen;
 
 namespace ImageFacade.AvaloniaDemo;
 
 /// <summary>
-/// FFmpeg.AutoGen 解码线程。产出的每一帧是直通 RGBA32（stride = width * 4），
-/// 通过“待取帧 + 空闲池”交接给 UI 线程，交接过程不复制像素。
+/// FFmpeg.AutoGen 解码线程。每一帧就是一个核心光栅的 <see cref="FacadeImage"/>（预乘 Rgba32），
+/// <c>sws_scale</c> 直接写进它的画布缓冲，通过"待取帧 + 空闲池"交接给 UI 线程，全程不复制像素。
 /// </summary>
 internal sealed unsafe class VideoPlayer : IDisposable
 {
-    /// <summary>帧缓冲池的固定容量：一次性按当前分辨率建满，此后只做整块替换，不扩容。</summary>
+    /// <summary>帧池的固定容量：一次性按当前分辨率建满，此后只做整块替换，不扩容。</summary>
     private const int PoolSize = 4;
 
     private readonly object _gate = new();
-    private readonly Queue<byte[]> _free = new();
+    private readonly Queue<FacadeImage> _free = new();
     private readonly ManualResetEventSlim _resume = new(true);
+
+    // 帧池的宿主：帧必须属于引擎，Dispose 时统一收走
+    private readonly ImageEngine _engine = new();
 
     private CancellationTokenSource? _cts;
     private Thread? _thread;
-    private byte[]? _pending;
+    private FacadeImage? _pending;
     private bool _frameOut;
+    private bool _disposed;
     private int _width;
     private int _height;
     private TimeSpan _position;
@@ -40,10 +45,12 @@ internal sealed unsafe class VideoPlayer : IDisposable
 
     public void Open(string path)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         Stop();
         lock (_gate)
         {
-            _free.Clear();
+            DrainPool();
             _pending = null;
             _frameOut = false;
             _error = null;
@@ -67,47 +74,89 @@ internal sealed unsafe class VideoPlayer : IDisposable
 
     public void Resume() => _resume.Set();
 
-    /// <summary>取走最新一帧；返回 false 表示还没有新帧。取到的缓冲用完必须交给 <see cref="ReturnFrame"/>。</summary>
-    public bool TryTakeFrame(out byte[] pixels, out int width, out int height, out TimeSpan position)
+    /// <summary>取走最新一帧；返回 false 表示还没有新帧。取到的帧用完必须交给 <see cref="ReturnFrame"/>。</summary>
+    public bool TryTakeFrame([NotNullWhen(true)] out FacadeImage? frame, out int width, out int height, out TimeSpan position)
     {
         lock (_gate)
         {
             if (_pending is null)
             {
-                pixels = [];
+                frame = null;
                 width = height = 0;
                 position = TimeSpan.Zero;
                 return false;
             }
 
-            pixels = _pending;
+            frame = _pending;
             _pending = null;
             _frameOut = true;
-            width = _width;
-            height = _height;
+            width = frame.Width;
+            height = frame.Height;
             position = _position;
             return true;
         }
     }
 
-    public void ReturnFrame(byte[] pixels)
+    public void ReturnFrame(FacadeImage frame)
     {
+        ArgumentNullException.ThrowIfNull(frame);
+
         lock (_gate)
         {
             _frameOut = false;
-            _free.Enqueue(pixels);
+            RecycleLocked(frame);
         }
+    }
+
+    /// <summary>归还一块从池里借出、但没能交到调用方手上的帧。</summary>
+    private void Recycle(FacadeImage frame)
+    {
+        lock (_gate)
+        {
+            RecycleLocked(frame);
+        }
+    }
+
+    /// <summary>调用方须持有 <see cref="_gate"/>。</summary>
+    private void RecycleLocked(FacadeImage frame)
+    {
+        if (_disposed)
+        {
+            // 引擎已经收工，池也清空了：就地释放，别再塞回去
+            frame.Dispose();
+            return;
+        }
+
+        _free.Enqueue(frame);
     }
 
     public void Dispose()
     {
         Stop();
-        _resume.Dispose();
+
         lock (_gate)
         {
-            _free.Clear();
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            DrainPool();
             _pending = null;
             _frameOut = false;
+        }
+
+        _resume.Dispose();
+        _engine.Dispose();
+    }
+
+    /// <summary>把池里的帧连缓冲一起还回引擎（画布来自池，不回收就是泄漏）。调用方须持有 <see cref="_gate"/>。</summary>
+    private void DrainPool()
+    {
+        while (_free.Count > 0)
+        {
+            _free.Dequeue().Dispose();
         }
     }
 
@@ -266,7 +315,7 @@ internal sealed unsafe class VideoPlayer : IDisposable
             }
         }
 
-        // 局部函数：把解码帧转成直通 RGBA32，再交给 UI 线程
+        // 局部函数：解码帧 → 直接缩放写进画布缓冲，再交给 UI 线程
         void Publish(AVFrame* decoded, double positionSeconds)
         {
             int width = decoded->width;
@@ -295,38 +344,53 @@ internal sealed unsafe class VideoPlayer : IDisposable
                 swsSource = sourceFormat;
             }
 
-            byte[]? target = RentBuffer(width * height * 4);
+            FacadeImage? target = RentFrame(width, height);
             if (target is null)
             {
-                // 4 块全在占用中（待取帧 / UI 正在渲染），这一帧不解码，直接丢掉
+                // 4 帧全在占用中（待取帧 / UI 正在渲染），这一帧不解码，直接丢掉
                 return;
             }
 
-            byte_ptrArray4 destination = new();
-            int_array4 destinationStride = new();
-            fixed (byte* pixels = target)
+            // 画布就是目的地：拿到它的缓冲和行距，sws 直接写进去，中间不再经过临时 byte[]
+            try
             {
-                // arrify 指针，sws_scale 只写平面 0
-                int ret = ffmpeg.av_image_fill_arrays(
-                    ref destination, ref destinationStride, pixels,
-                    AVPixelFormat.AV_PIX_FMT_RGBA, width, height, 1);
-                if (ret < 0)
+                if (!target.TryGetRasterBuffer(out byte[] destinationPixels, out int destinationStride))
                 {
-                    throw new InvalidOperationException($"av_image_fill_arrays 失败：{ret}");
+                    throw new InvalidOperationException("视频帧必须落在核心光栅后端上（raster）。");
                 }
 
-                ret = ffmpeg.sws_scale(sws, decoded->data, decoded->linesize, 0, height, destination, destinationStride);
-                if (ret < 0)
+                fixed (byte* pixels = destinationPixels)
                 {
-                    throw new InvalidOperationException($"sws_scale 失败：{ret}");
+                    // 只有平面 0 有数据，行距用画布自己的 stride，
+                    // 不能用 av_image_fill_arrays 重算（那会按 width * 4 对齐，可能和画布不一致）
+                    byte_ptrArray4 destination = new();
+                    int_array4 destinationStrideArray = new();
+                    destination[0] = pixels;
+                    destinationStrideArray[0] = destinationStride;
+
+                    int ret = ffmpeg.sws_scale(sws, decoded->data, decoded->linesize, 0, height, destination, destinationStrideArray);
+                    if (ret < 0)
+                    {
+                        throw new InvalidOperationException($"sws_scale 失败：{ret}");
+                    }
                 }
             }
+            catch
+            {
+                // 这一帧还没交出去就失败了：还回池，别让它连缓冲一起漏掉
+                Recycle(target);
+                throw;
+            }
+
+            // 说明：sws 输出的是直通 RGBA，画布要求预乘 Rgba32。视频源没有 alpha 通道
+            // （解码后 alpha 恒为 255），所以两者逐字节一致；带 alpha 的源会偏暗，
+            // 这种源要在上面改回"缩放到临时缓冲 + ImportPixels 转换"的老路。
 
             lock (_gate)
             {
                 if (_pending is not null)
                 {
-                    // 上一帧还没被取走：块本来就属于池，直接还回去
+                    // 上一帧还没被取走：帧本来就属于池，直接还回去
                     _free.Enqueue(_pending);
                 }
 
@@ -357,14 +421,14 @@ internal sealed unsafe class VideoPlayer : IDisposable
     }
 
     /// <summary>
-    /// 从固定池里借一块缓冲。池容量恒为 <see cref="PoolSize"/>：
-    /// 首帧按当前分辨率一次建满；之后遇到尺寸不够的块就丢弃重建；池被占满则返回 null（本帧不解）。
+    /// 从固定池里借一帧。池容量恒为 <see cref="PoolSize"/>：
+    /// 首帧按当前分辨率一次建满；之后尺寸不符的帧丢弃重建；池被占满则返回 null（本帧不解）。
     /// </summary>
-    private byte[]? RentBuffer(int size)
+    private FacadeImage? RentFrame(int width, int height)
     {
         lock (_gate)
         {
-            // 池内块 = 空闲 + 待取帧 + UI 手上那块
+            // 池内帧 = 空闲 + 待取帧 + UI 手上那帧
             int pooled = _free.Count + (_pending is null ? 0 : 1) + (_frameOut ? 1 : 0);
 
             if (pooled == 0)
@@ -372,7 +436,7 @@ internal sealed unsafe class VideoPlayer : IDisposable
                 // 首帧：一次建满，避免运行中反复 new 大对象（LOH 抖动）
                 for (int i = 0; i < PoolSize; i++)
                 {
-                    _free.Enqueue(new byte[size]);
+                    _free.Enqueue(_engine.Create(width, height, Rgba32.Black));
                 }
 
                 return _free.Dequeue();
@@ -380,13 +444,14 @@ internal sealed unsafe class VideoPlayer : IDisposable
 
             while (_free.Count > 0)
             {
-                byte[] candidate = _free.Dequeue();
-                if (candidate.Length >= size)
+                FacadeImage candidate = _free.Dequeue();
+                if (candidate.Width == width && candidate.Height == height)
                 {
                     return candidate;
                 }
 
-                // 分辨率变大，这块不够用了：丢掉它，下面按新尺寸补一块
+                // 分辨率变了，这块用不上：还给引擎，下面按新尺寸补一块
+                candidate.Dispose();
                 pooled--;
             }
 
@@ -395,7 +460,7 @@ internal sealed unsafe class VideoPlayer : IDisposable
                 return null;
             }
 
-            return new byte[size];
+            return _engine.Create(width, height, Rgba32.Black);
         }
     }
 

@@ -149,4 +149,50 @@ public sealed class RasterBackendTests
 
         Assert.True(canvas.DetectTransparency() ?? false);
     }
+
+    [Fact]
+    public void TryGetRasterBuffer_Returns_Premultiplied_Pixels()
+    {
+        using var engine = new ImageEngine();
+        using FacadeImage image = engine.Create(8, 4, new Rgba32(255, 0, 0, 128));
+
+        Assert.True(image.TryGetRasterBuffer(out byte[] buffer, out int stride));
+
+        Assert.Equal(8 * 4, stride);
+        Assert.True(buffer.Length >= stride * 4);
+
+        // 半透明红存进去是预乘的：R ≈ 255 * 128 / 255
+        Assert.InRange(buffer[0], 126, 129);
+        Assert.Equal(0, buffer[1]);
+        Assert.Equal(0, buffer[2]);
+        Assert.Equal(128, buffer[3]);
+    }
+
+    [Fact]
+    public void TryGetRasterBuffer_Writes_Are_Visible_To_GetPixel()
+    {
+        using var engine = new ImageEngine();
+        using FacadeImage image = engine.Create(2, 2, Rgba32.Black);
+
+        Assert.True(image.TryGetRasterBuffer(out byte[] buffer, out int stride));
+
+        buffer[0] = 255;   // 预乘 = 直通（全不透明）
+        buffer[1] = 255;
+        buffer[2] = 255;
+        buffer[3] = 255;
+
+        Assert.Equal(0, buffer[stride]);   // stride 确实按行推进：第二行第一列仍是原来的黑
+        Assert.Equal(new Rgba32(255, 255, 255, 255), image.GetPixel(0, 0));
+    }
+
+    [Fact]
+    public void TryGetRasterBuffer_Throws_After_Dispose()
+    {
+        using var engine = new ImageEngine();
+        FacadeImage image = engine.Create(2, 2, Rgba32.Black);
+
+        image.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => image.TryGetRasterBuffer(out _, out _));
+    }
 }

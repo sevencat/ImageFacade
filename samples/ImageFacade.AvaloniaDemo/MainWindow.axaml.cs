@@ -125,7 +125,7 @@ internal sealed partial class MainWindow : Window
         try
         {
             // 走 Sdcb 软后端编码；想换成"零编解码依赖"的做法就改调 SaveFrameWithAvalonia
-            _composer.SavePng(file.Path.LocalPath);
+            SaveCurrentFrame(file.Path.LocalPath);
             StatusText.Text = $"已保存：{file.Path.LocalPath}";
         }
         catch (Exception ex)
@@ -134,14 +134,30 @@ internal sealed partial class MainWindow : Window
         }
     }
 
+    /// <summary>把当前显示的画面（最后一次渲染的视频帧 + HUD）存成 PNG。</summary>
+    /// <remarks>
+    /// 视频帧归还池之后随时会被解码线程改写，所以保存的是已经拷进 <see cref="_bitmap"/> 的那一份：
+    /// 从 framebuffer 读回来，导进软后端画布再编码。
+    /// </remarks>
+    private void SaveCurrentFrame(string path)
+    {
+        if (_bitmap is null)
+        {
+            throw new InvalidOperationException("还没有渲染过任何一帧。");
+        }
+
+        using ILockedFramebuffer framebuffer = _bitmap.Lock();
+        _composer.SavePng(framebuffer.Address, framebuffer.RowBytes, _bitmapWidth, _bitmapHeight, path);
+    }
+
     /// <summary>
     /// 备选方案，当前<b>没有</b>调用：如果不想引入 <c>ImageFacade.SdcbSimdCodecs</c> 和
     /// <c>Sdcb.SimdCodecs.Png</c>，可以直接用 Avalonia 主包自带的 PNG 编码器把位图写盘——
     /// 项目里一个编解码包都不用引（SimdSkia 后端已实现 <c>Bitmap.Save(Stream)</c>）。
     /// </summary>
     /// <remarks>
-    /// 两条路径的差别：<see cref="FrameComposer.SavePng"/> 存的是 <see cref="ImageFacade.FacadeImage"/>
-    /// 的像素，能带 <see cref="ImageFacade.SaveOptions"/>（压缩级别 / 质量 / 元数据）和
+    /// 两条路径的差别：<see cref="FrameComposer.SavePng"/> 会把画面导回 <see cref="ImageFacade.FacadeImage"/>
+    /// 重新编码，能带 <see cref="ImageFacade.SaveOptions"/>（压缩级别 / 质量 / 元数据）和
     /// 后续换成 JPEG、WebP 等格式；这里存的是已经交给 Avalonia 的 <see cref="WriteableBitmap"/>，
     /// 编码完全由渲染后端决定，拿不到那些选项。
     /// </remarks>
@@ -247,7 +263,7 @@ internal sealed partial class MainWindow : Window
             return;
         }
 
-        if (!player.TryTakeFrame(out byte[] pixels, out int width, out int height, out TimeSpan position))
+        if (!player.TryTakeFrame(out FacadeImage? frame, out int width, out int height, out TimeSpan position))
         {
             return;
         }
@@ -257,8 +273,8 @@ internal sealed partial class MainWindow : Window
             EnsureBitmap(width, height);
             using ILockedFramebuffer framebuffer = _bitmap!.Lock();
 
-            // 直通 RGBA32 入 → 画 HUD → 直通 RGBA32 写进 WriteableBitmap（位图本身就是 Rgba8888）
-            _composer.Compose(pixels, width, height, framebuffer.Address, framebuffer.RowBytes, position, _fps);
+            // 视频帧本身就是画布：HUD 直接画上去，再整块写进 WriteableBitmap（位图本身就是 Rgba8888）
+            _composer.Compose(frame, framebuffer.Address, framebuffer.RowBytes, position, _fps);
 
             VideoView.InvalidateVisual();
 
@@ -285,7 +301,7 @@ internal sealed partial class MainWindow : Window
         }
         finally
         {
-            player.ReturnFrame(pixels);
+            player.ReturnFrame(frame);
         }
     }
 
@@ -296,7 +312,7 @@ internal sealed partial class MainWindow : Window
         {
             try
             {
-                _composer.SavePng(framePath);
+                SaveCurrentFrame(framePath);
                 Console.Error.WriteLine($"[save-frame] {framePath}");
             }
             catch (Exception ex)

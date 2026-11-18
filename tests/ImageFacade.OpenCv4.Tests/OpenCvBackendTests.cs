@@ -602,4 +602,16 @@ public sealed class OpenCvBackendTests
         Assert.Throws<ObjectDisposedException>(() => image.SharedMat());
     }
 
+    [Fact]
+    public void TryGetRasterBuffer_Returns_False_For_OpenCv_Backend()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(4, 4, Rgba32.White);
+
+        // OpenCV 后端持有原生 Mat，没有核心光栅那块托管缓冲；零拷贝要走 SharedMat
+        Assert.False(image.TryGetRasterBuffer(out byte[] buffer, out int stride));
+        Assert.Empty(buffer);
+        Assert.Equal(0, stride);
+    }
+
 }

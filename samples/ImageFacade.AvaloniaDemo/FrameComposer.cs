@@ -5,15 +5,13 @@ using RectF = ImageFacade.RectF;
 namespace ImageFacade.AvaloniaDemo;
 
 /// <summary>
-/// 一帧的合成：直通 RGBA32 进 → ImageFacade 画 HUD → 直通 RGBA32 写进目标缓冲。
-/// 画布只在尺寸变化时重建，之后每帧用 <see cref="FacadeImage.ImportPixels"/> 覆盖像素。
+/// 一帧的合成：视频帧本身就是画布，HUD 直接画上去，再整块写进目标缓冲。
 /// 目标可以是 Avalonia 的 <c>ILockedFramebuffer.Address</c>，也可以是临时内存（自检用）。
 /// </summary>
-internal sealed class FrameComposer : IDisposable
+internal sealed unsafe class FrameComposer : IDisposable
 {
-    // 渲染和保存共用一个软后端：绘制 / 像素读写由 ImageBackendBase 直接转给核心光栅
-    // （与 new ImageEngine() 是同一份实现），编解码则挂在这个后端上——
-    // 所以画布本身就能直接 SavePng，不需要中转一份像素。
+    // 只在保存 PNG 时用到：编解码挂在这个软后端上，导回来的画布能直接 SavePng。
+    // 逐帧渲染不经过它——帧属于 VideoPlayer 自己的核心光栅引擎。
     private readonly ImageEngine _engine = new(new SoftwareBackend());
     private readonly TextStyle _style = new()
     {
@@ -22,36 +20,38 @@ internal sealed class FrameComposer : IDisposable
         Color = Rgba32.White,
     };
 
-    //这个就是用来做处理的。尺寸大小变化 时重建
     private FacadeImage? _canvas;
 
+    /// <summary>在视频帧上叠 HUD，然后把结果整块写进目标缓冲（直通 RGBA32）。</summary>
     public void Compose(
-        ReadOnlySpan<byte> rgba,
-        int width,
-        int height,
+        FacadeImage frame,
         IntPtr destination,
         int destinationStride,
         TimeSpan position,
         double fps)
     {
-        FacadeImage canvas = EnsureCanvas(width, height);
-        canvas.ImportPixels(rgba, width * 4);
+        ArgumentNullException.ThrowIfNull(frame);
 
-        canvas.FillRectangle(new RectF(12, 12, 214, 64), new Rgba32(0, 0, 0, 150));
-        canvas.DrawText("时间 "+position.ToString(@"mm\:ss\.fff"), new PointF(20, 18), _style);
-        canvas.DrawText($"fps {fps:0.0}", new PointF(20, 44), _style);
-        canvas.CopyPixelsTo(destination, destinationStride, PixelFormat.Rgba32);
+        frame.FillRectangle(new RectF(12, 12, 214, 64), new Rgba32(0, 0, 0, 150));
+        frame.DrawText("时间 " + position.ToString(@"mm\:ss\.fff"), new PointF(20, 18), _style);
+        frame.DrawText($"fps {fps:0.0}", new PointF(20, 44), _style);
+        frame.CopyPixelsTo(destination, destinationStride, PixelFormat.Rgba32);
     }
 
     /// <summary>
-    /// 把最近一帧（含 HUD）直接交给 Sdcb 软后端编码成 PNG。
-    /// 画布本身就在软后端上，编码器直接从它的像素读，没有中转缓冲。
+    /// 把已经渲染好的画面（Avalonia framebuffer / 临时内存）导回一张软后端画布再编码成 PNG。
+    /// 帧归还池之后随时会被解码线程改写，所以保存必须基于目标缓冲，而不是视频帧。
     /// </summary>
-    public void SavePng(string path)
+    public void SavePng(IntPtr rgba, int stride, int width, int height, string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (rgba == IntPtr.Zero)
+        {
+            throw new ArgumentException("目标缓冲为空。", nameof(rgba));
+        }
 
-        FacadeImage canvas = _canvas ?? throw new InvalidOperationException("还没有可保存的帧。");
+        FacadeImage canvas = EnsureCanvas(width, height);
+        canvas.ImportPixels(new ReadOnlySpan<byte>((void*)rgba, checked(stride * height)), stride);
         canvas.SavePng(path);
     }
 
