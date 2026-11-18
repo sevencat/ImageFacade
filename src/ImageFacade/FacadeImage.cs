@@ -520,6 +520,35 @@ public sealed class FacadeImage : IDisposable
 
     // ---- 像素互操作 ----
 
+    /// <summary>
+    /// 用一整帧直通像素覆盖这张图（尺寸必须与当前图一致），返回 <c>this</c> 以便继续绘制。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 与 <see cref="ImageEngine.FromPixels(ReadOnlySpan{byte}, int, int, int, PixelFormat)"/> 的导入部分语义相同
+    /// （直通 RGBA32 进、内部存预乘），区别是复用已经存在的帧：逐帧刷新同一块画布时，
+    /// 不必每帧新建帧、租还整幅缓冲。转换（直通 → 预乘）本身省不掉，那是"帧内统一预乘"的代价。
+    /// </para>
+    /// <para>
+    /// 导入是<b>整幅覆盖</b>，不会保留上一帧内容；之后照常
+    /// <see cref="DrawText"/> / <see cref="FillRectangle"/>，再
+    /// <see cref="CopyPixelsTo(IntPtr, int, PixelFormat)"/> 交给 UI。尺寸变了请用引擎重建一张图。
+    /// </para>
+    /// <para>
+    /// 零拷贝视图（<see cref="IsZeroCopy"/>）也可以导入，此时写入会落到调用方自己的内存上。
+    /// </para>
+    /// </remarks>
+    public FacadeImage ImportPixels(ReadOnlySpan<byte> pixels, int stride, PixelFormat format = PixelFormat.Rgba32)
+    {
+        ThrowIfDisposed();
+        ImageEngine.ValidatePixelBuffer(pixels, Width, Height, stride, format);
+        ImageEngine.ImportInto(_backend, Frame, pixels, Width, Height, stride, format);
+
+        // 上一帧的 alpha 结论对新像素不成立（可能从不透明变成有半透明，也可能反过来）
+        _metadata = _metadata.WithHasTransparency(null);
+        return this;
+    }
+
     public Rgba32 GetPixel(int x, int y)
     {
         ThrowIfDisposed();

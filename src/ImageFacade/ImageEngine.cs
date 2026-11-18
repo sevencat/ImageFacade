@@ -1,6 +1,7 @@
 using System.Buffers;
 using ImageFacade.Backends;
 using ImageFacade.Internal;
+using ImageFacade.Rendering;
 
 namespace ImageFacade;
 
@@ -16,6 +17,16 @@ public sealed class ImageEngine : IDisposable
     private readonly bool _ownsBackend;
 
     private bool _disposed;
+
+    /// <summary>
+    /// 用核心自带的光栅器建引擎：<b>不编解码</b>，只负责建图 / 画 / 交像素。
+    /// 只想引用主包画图（例如把 ffmpeg 的裸帧画上文字）时用这个构造，
+    /// 需要 Load / Save 时再换成带 codec 的后端。
+    /// </summary>
+    public ImageEngine()
+        : this(new RasterBackend(), ownsBackend: true)
+    {
+    }
 
     /// <param name="backend">要绑定的后端。</param>
     /// <param name="ownsBackend">
@@ -311,7 +322,34 @@ public sealed class ImageEngine : IDisposable
     {
         ThrowIfDisposed();
         ValidateSize(width, height);
+        ValidatePixelBuffer(pixels, width, height, stride, format);
 
+        IFrame frame = Backend.Create(width, height, background: null);
+        try
+        {
+            ImportInto(Backend, frame, pixels, width, height, stride, format);
+        }
+        catch
+        {
+            frame.Dispose();
+            throw;
+        }
+
+        return new FacadeImage(this, Backend, frame, new ImageMetadata(ImageFormat.Unknown, width, height, 0, hasAlpha: true));
+    }
+
+    /// <summary>
+    /// 校验"直通像素缓冲 + stride"够不够铺满一张 <paramref name="width"/>×<paramref name="height"/> 的图。
+    /// 由 <see cref="FromPixels(ReadOnlySpan{byte}, int, int, int, PixelFormat)"/> 与
+    /// <see cref="FacadeImage.ImportPixels(ReadOnlySpan{byte}, int, PixelFormat)"/> 共用。
+    /// </summary>
+    internal static void ValidatePixelBuffer(
+        ReadOnlySpan<byte> pixels,
+        int width,
+        int height,
+        int stride,
+        PixelFormat format)
+    {
         int bytesPerPixel = format.GetBytesPerPixel();
         int minimumStride = width * bytesPerPixel;
         if (stride < minimumStride)
@@ -324,37 +362,39 @@ public sealed class ImageEngine : IDisposable
         {
             throw new ArgumentException($"pixels 缓冲区太小（需要 {required} 字节，实际 {pixels.Length}）。", nameof(pixels));
         }
+    }
 
-        IFrame frame = Backend.Create(width, height, background: null);
+    /// <summary>
+    /// 把一整帧直通像素覆盖进已有帧：规范 RGBA32 直接交给后端做"直通 → 预乘"，
+    /// 其它格式先转成规范 RGBA32（借池缓冲，不长期占用）。
+    /// </summary>
+    internal static void ImportInto(
+        IImageBackend backend,
+        IFrame frame,
+        ReadOnlySpan<byte> pixels,
+        int width,
+        int height,
+        int stride,
+        PixelFormat format)
+    {
+        if (format == PixelFormat.Rgba32)
+        {
+            backend.ImportPixels(frame, pixels, stride);
+            return;
+        }
+
+        int canonicalStride = checked(width * 4);
+        byte[] rented = ArrayPool<byte>.Shared.Rent(checked(canonicalStride * height));
         try
         {
-            int canonicalStride = checked(width * 4);
-            if (format == PixelFormat.Rgba32)
-            {
-                Backend.ImportPixels(frame, pixels, stride);
-            }
-            else
-            {
-                byte[] rented = ArrayPool<byte>.Shared.Rent(checked(canonicalStride * height));
-                try
-                {
-                    Span<byte> canonical = rented.AsSpan(0, canonicalStride * height);
-                    PixelConverter.Convert(pixels, stride, format, canonical, canonicalStride, PixelFormat.Rgba32, width, height);
-                    Backend.ImportPixels(frame, canonical, canonicalStride);
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(rented);
-                }
-            }
+            Span<byte> canonical = rented.AsSpan(0, canonicalStride * height);
+            PixelConverter.Convert(pixels, stride, format, canonical, canonicalStride, PixelFormat.Rgba32, width, height);
+            backend.ImportPixels(frame, canonical, canonicalStride);
         }
-        catch
+        finally
         {
-            frame.Dispose();
-            throw;
+            ArrayPool<byte>.Shared.Return(rented);
         }
-
-        return new FacadeImage(this, Backend, frame, new ImageMetadata(ImageFormat.Unknown, width, height, 0, hasAlpha: true));
     }
 
     /// <summary>

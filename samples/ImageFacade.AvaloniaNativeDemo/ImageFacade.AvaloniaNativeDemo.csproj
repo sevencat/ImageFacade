@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ImageFacade.AvaloniaNativeDemo</AssemblyName>
+    <RootNamespace>ImageFacade.AvaloniaNativeDemo</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 对照组：走 Avalonia 官方桌面后端（Win32 + Skia），与 SimdSkia 示例只有渲染后端不同 -->
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="FFmpeg.AutoGen" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 直接链源码复用解码/合成，避免两边逻辑漂移 -->
+    <Compile Include="..\ImageFacade.AvaloniaDemo\VideoPlayer.cs" Link="Shared\VideoPlayer.cs" />
+    <Compile Include="..\ImageFacade.AvaloniaDemo\FrameComposer.cs" Link="Shared\FrameComposer.cs" />
+    <Compile Include="..\ImageFacade.AvaloniaDemo\FfmpegRuntime.cs" Link="Shared\FfmpegRuntime.cs" />
+  </ItemGroup>
+
+  <!-- FFmpeg 原生库不入库：优先用 FFMPEG_HOME\bin，否则借用同级 SimdSkia 示例 bin 里那份 -->
+  <PropertyGroup>
+    <FfmpegNativeSource Condition="'$(FfmpegNativeSource)' == '' and '$(FFMPEG_HOME)' != '' and Exists('$(FFMPEG_HOME)\bin\avcodec-63.dll')">$(FFMPEG_HOME)\bin</FfmpegNativeSource>
+    <FfmpegNativeSource Condition="'$(FfmpegNativeSource)' == '' and Exists('$(MSBuildThisFileDirectory)..\ImageFacade.AvaloniaDemo\bin\$(Configuration)\$(TargetFramework)\avcodec-63.dll')">$(MSBuildThisFileDirectory)..\ImageFacade.AvaloniaDemo\bin\$(Configuration)\$(TargetFramework)</FfmpegNativeSource>
+  </PropertyGroup>
+
+  <Target Name="CopyFfmpegNative" AfterTargets="Build" Condition="'$(FfmpegNativeSource)' != ''">
+    <ItemGroup>
+      <_FfmpegNativeDll Include="$(FfmpegNativeSource)\av*.dll;$(FfmpegNativeSource)\sw*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_FfmpegNativeDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

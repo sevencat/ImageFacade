@@ -1,0 +1,35 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="ImageFacade.AvaloniaDemo.MainWindow"
+        Title="ImageFacade + SimdSkia + FFmpeg.AutoGen"
+        Width="880"
+        Height="540"
+        WindowStartupLocation="CenterScreen"
+        Background="Black">
+    <!-- 根容器要给一个**不透明**的 Background。真正的原因是 Avalonia 12.1.5 自身：
+         窗口背景不透明、而根 Panel 的 Background 为 null 或 Transparent 时，
+         Button 这类带模板的控件会整块不绘制（官方 Skia 后端同样复现）。
+         注意 Transparent 也不管用，必须给不透明色。对照见 repro/ 下的几个工程。 -->
+    <StackPanel Background="#1F2229">
+        <Grid ColumnDefinitions="Auto,Auto,*" Margin="12,10">
+            <Button x:Name="OpenButton"
+                    Content="打开视频…"
+                    Click="OnOpenClick" />
+            <Button x:Name="PauseButton"
+                    Grid.Column="1"
+                    Content="暂停"
+                    IsEnabled="False"
+                    Margin="8,0,0,0"
+                    Click="OnPauseClick" />
+        </Grid>
+
+        <Border x:Name="VideoHost" Height="420" Background="Black">
+            <Image x:Name="VideoView" Stretch="Uniform" IsVisible="False" />
+        </Border>
+
+        <TextBlock x:Name="StatusText"
+                   Margin="12,6"
+                   FontSize="12"
+                   Foreground="LightGray" />
+    </StackPanel>
+</Window>

@@ -206,6 +206,96 @@ using var engine = new ImageEngine(new OpenCvBackend());
 using var engine = new ImageEngine(new SoftwareBackend());    // 纯托管，无原生依赖（编解码要先注册，见上）
 ```
 
+## 只画不存：核心自带光栅（`new ImageEngine()`）
+
+主包除了抽象，还带一套自绘光栅器。**不引任何后端包**也能建图、画字画形状、把像素交给 UI：
+
+```csharp
+using var engine = new ImageEngine();                 // 只有光栅，没有编解码
+using FacadeImage image = engine.Create(1280, 720, Rgba32.Black);
+
+image.DrawText("帧率 59.9", new PointF(16, 16), new TextStyle
+{
+    Font = FontRef.BuiltIn,
+    Size = 24,
+    Color = Rgba32.White,
+});
+
+image.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);   // 写进 Avalonia WriteableBitmap
+```
+
+它的绘制能力与软后端**完全相同**（`SoftwareBackend` 的建图、绘制、测量就是转发给同一个光栅器），区别只在编解码：
+
+| 能力 | `new ImageEngine()` | `new ImageEngine(new SoftwareBackend())` |
+|---|:---:|:---:|
+| Create / 绘制 / Resize / 文字 / `FromPixels` / `ImportPixels` / `CopyPixelsTo` | ✓ | ✓ |
+| `CanDecode` / `CanEncode` | 全 `false` | 按注册 |
+| `Load` / `Save` / `Encode` | 抛 `FeatureNotSupportedException` | 已注册的格式可用 |
+
+### 逐帧刷新：复用同一张图，别每帧 `FromPixels`
+
+`FromPixels` 每次都会新建一帧并租一整幅缓冲。尺寸不变时（视频播放、摄像头、UI 自绘），建一次图、之后每帧用 `ImportPixels` 覆盖更划算：
+
+```csharp
+using var engine = new ImageEngine();
+FacadeImage? canvas = null;
+
+void Compose(ReadOnlySpan<byte> frame, int width, int height, ILockedFramebuffer fb)
+{
+    if (canvas is null || canvas.Width != width || canvas.Height != height)
+    {
+        canvas?.Dispose();
+        canvas = engine.Create(width, height, Rgba32.Black);   // 只在尺寸变化时重建
+    }
+
+    canvas.ImportPixels(frame, width * 4);                    // 整幅覆盖，上一帧内容不保留
+    canvas.DrawText("帧率 59.9", new PointF(16, 16), hudStyle);
+    canvas.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);
+}
+```
+
+`ImportPixels` 与 `FromPixels` 的导入部分语义一致（直通 RGBA32 进、内部存预乘），省掉的只是每帧新建帧与租还缓冲；**直通 → 预乘那一次转换省不掉**。导入会作废 `HasTransparency` 的缓存结论，之后 `DetectTransparency()` 会按新像素重算。
+
+### 画完要保存：换后端，不是给引擎加能力
+
+`FacadeImage` 在构造时就把 `ImageEngine` 绑定死了，之后无法改绑；`ImageBackendBase.RegisterCodec` 注册的是 `ImageBackendBase` 的进程级静态表，只有它的派生类（软后端）会读，核心光栅不参与。所以**先 `new ImageEngine()` 再注册 PNG 是存不了的**。
+
+直接换成软后端引擎即可，绘制零损失（`using` 与注册写法见上文 **[软后端：编解码按需接入](#软后端编解码按需接入)**）：
+
+```csharp
+ImageBackendBase.RegisterCodec(ImageFormat.Png, PngImageDecoder.Registration, PngImageEncoder.Registration);
+
+using var engine = new ImageEngine(new SoftwareBackend());   // 画图能力同上，额外带编解码
+using FacadeImage image = engine.Create(1280, 720, Rgba32.Black);
+image.DrawText(...);
+image.Save("out.png");
+```
+
+如果两个引擎都已经在手上（轻量引擎画、带编解码的引擎存），搬一次像素即可：
+
+```csharp
+byte[] pixels = image.CopyPixels();                          // 直通 RGBA32，stride = width * 4
+
+using var saver = new ImageEngine(new SoftwareBackend());
+using FacadeImage toSave = saver.FromPixels(pixels, image.Width, image.Height, image.Width * 4);
+toSave.Save("out.png");
+```
+
+代价是两次全帧拷贝 + 两次遍历（导出一次、重建时直通→预乘一次）；偶尔保存无所谓，频繁保存请从一开始就用 `SoftwareBackend`。
+
+### 换成 Skia 也能存
+
+Skia 后端自带编解码，**不需要注册**，可编码 PNG / JPEG / WebP（解码还多 BMP / GIF / ICO）：
+
+```csharp
+using var engine = new ImageEngine(new SkiaBackend());
+using FacadeImage image = engine.Create(1920, 1080, Rgba32.Black);
+image.DrawText(...);
+image.Save("out.jpg", new SaveOptions { Quality = 85 });     // 或 SavePng / EncodeWebP
+```
+
+同样不能"用核心光栅画、让 Skia 存"——跨引擎还是要走上面那段搬像素。要原生绘制与原生编码一体，就整个引擎都换成 `SkiaBackend`。
+
 ## 一行加载 / 保存（推荐入口）
 
 **日常用图不要手写格式**：启动时把引擎赋给 `ImageEngine.Default` 一次，之后加载用 `ImageLoader.LoadXxx`、保存 / 编码用 `img.SaveXxx` / `img.EncodeXxx`，格式写进方法名里：
@@ -449,6 +539,8 @@ OpenCV 解码后会把输入统一成 **8 位 BGRA**：灰度、灰度+alpha、�
 
 **跨后端不保证逐像素一致**：抗锯齿、字体栅格化、缩放核的实现各不相同。需要确定性输出时把软后端当主后端。
 
+主包还自带一套光栅器（`new ImageEngine()`），绘制能力与"软后端"那一列相同，但不含任何编解码：`CanDecode` / `CanEncode` 全 `false`，`Load` / `Save` 抛 `FeatureNotSupportedException`。需要保存时换 `SoftwareBackend`（注册格式）或 `SkiaBackend`（自带编解码），见 **[只画不存：核心自带光栅](#只画不存核心自带光栅new-imageengine)**。
+
 ## 中文与字体
 
 - 核心内置文泉驿微米黑（`FontRef.BuiltIn`），**没有系统字体也能画中文**；容器 / CI / AOT 场景不需要额外准备字体。
@@ -570,6 +662,56 @@ dotnet pack  ImageFacade.slnx -c Release -o artifacts/packages
 - v1 只在 **win-x64** 验收；Linux/macOS 只保证核心与纯托管后端可编译。
 - CI 见 `.github/workflows/ci.yml`：Windows + .NET 10，跑 build → test → pack。
 
+## 示例：Avalonia 播放器（SimdSkia + FFmpeg.AutoGen）
+
+`samples/ImageFacade.AvaloniaDemo` 是一条端到端链路：FFmpeg.AutoGen 解出裸帧 → ImageFacade 在帧上叠时间和 fps → 写进 Avalonia 的 `WriteableBitmap`；窗口用 `SimdSkia.Avalonia.Desktop` 渲染，全程不引 SkiaSharp，也不引任何编解码包。
+
+```powershell
+# 1. 原生库：FFmpeg.AutoGen 只是绑定，DLL 由运行环境提供。
+#    把 ffmpeg 的 bin 目录里 avcodec / avformat / avutil / swscale 等 DLL 放到程序目录，
+#    或设置 FFMPEG_HOME 指向该 bin 目录。
+$env:FFMPEG_HOME = 'C:\ffmpeg\bin'
+
+# 2. 构建并运行，点「打开视频…」选一个本地文件
+dotnet run --project samples/ImageFacade.AvaloniaDemo
+
+# 3. 直接带一个文件启动，省掉文件对话框
+dotnet run --project samples/ImageFacade.AvaloniaDemo -- --open D:\clips\demo.mp4
+
+# 4. 无图形会话时自检解码 + HUD 合成（结果写进输出目录的 decode-check.log，退出码表示成败）
+dotnet run --project samples/ImageFacade.AvaloniaDemo -- --decode-check D:\clips\demo.mp4
+```
+
+- 界面在 `MainWindow.axaml`，逻辑在 `MainWindow.axaml.cs`。
+- 后台解码线程按 PTS 节流产出直通 RGBA32 帧，UI 线程用 `DispatcherTimer` 取最新帧写入 `WriteableBitmap`；分辨率变化时重建位图。
+- HUD 在 `FrameComposer` 里用核心光栅完成：画布按尺寸建一次，之后每帧 `ImportPixels` → `FillRectangle` / `DrawText` → `CopyPixelsTo(Bgra32)`。
+- 窗口底部显示当前尺寸、时间与单帧分配字节数。
+- 根容器必须给一个**不透明的 `Background`**。这跟渲染后端无关：Avalonia 12.1.5 在「窗口背景不透明 + 根 Panel 的 `Background` 为 `null` 或 `Transparent`」时，`Button` 这类带模板的控件会整块不绘制（官方 Skia 后端同样复现），`TextBlock`、`Border` 不受影响。给个不透明色即可，`Transparent` 不管用。
+
+### 原生后端对照：`samples/ImageFacade.AvaloniaNativeDemo`
+
+同一份解码与 HUD 合成代码（直接链接 `VideoPlayer.cs` / `FrameComposer.cs`，没有复制），只把 `UseSimdSkiaDesktop()` 换成官方的 `UsePlatformDetect()`，用来判断某个现象到底出在 ImageFacade 还是出在渲染后端。
+
+```powershell
+dotnet run --project samples/ImageFacade.AvaloniaNativeDemo -- --open D:\clips\demo.mp4 --mem
+```
+
+`--mem` 每 2 秒往 stderr 打一行，字段与 SimdSkia 版完全一致，可以直接并排看。
+
+**播放过程中不会反复分配大内存。** 整条链路只有三处持有像素，每处都只建一次：
+
+| 环节 | 创建时机 | 之后每帧做什么 |
+|---|---|---|
+| 解码帧池（4 块 `byte[]`） | 首帧按分辨率一次建满 | 取帧 / 归还只换引用，不 `new`、不复制 |
+| ImageFacade 画布 | 分辨率变化时 `Create` | `ImportPixels` 覆盖同一块内存，HUD 画在上面 |
+| `WriteableBitmap` | 分辨率变化时 `new` | `Lock()` 后由 `CopyPixelsTo` 直接写进去 |
+
+实测 960×720、60 秒：托管堆 12.5 MB 恒定，LOH 10.5 MB（就是那 4 块帧池），分配速率 0.2 MB/s，GC 1 次。同一个视频在 SimdSkia 后端上是 52~95 MB 来回抖、约 40 MB/s、GC 20 多次；差别全在绘制路径，解码和合成一行没改。
+
+**还能再省一次拷贝。** 现在每帧要搬两遍全帧：帧池 → 画布（`ImportPixels`）、画布 → `WriteableBitmap`（`CopyPixelsTo`）。第一遍其实是白搬的：如果让画布直接落在帧池那块内存上（一张图只创建一次，之后每帧只是同一块内存换了内容），HUD 就画在解码输出上，最后只剩 `CopyPixelsTo` 这一趟。960×720 一帧 2.6 MB，15 fps 下等于少搬约 39 MB/s。
+
+这条路眼下还没接通：`ImageEngine.FromPixels(ptr, ..., wrap: true)` 需要后端实现 `TryWrapPixels` 才真正零拷贝，而现有后端（软光栅 / Skia / ImageSharp / OpenCV）一律返回 `false`（内部是预乘或 BGRA，接不了直通 RGBA），现在调它只会退化成一次导入，白忙。要真省掉这趟搬运，得先让软光栅的画布支持零拷贝接管。
+
 ## 项目结构
 
 ```
@@ -583,6 +725,8 @@ src/
   ImageFacade.OpenCvSharp5/        # OpenCvSharp5（链接上一份源码）
 tests/                             # 一后端一测试工程，共享测试源码
 samples/ImageFacade.Samples/       # 示例 + README 截图生成器
+samples/ImageFacade.AvaloniaDemo/  # Avalonia + SimdSkia + FFmpeg.AutoGen 播放器
+samples/ImageFacade.AvaloniaNativeDemo/  # 同一份逻辑换官方 Avalonia 后端，用于对照
 docs/images/                       # 截图
 ```
 

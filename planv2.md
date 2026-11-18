@@ -708,3 +708,628 @@ Skia `Load_Reports_Transparency_From_Real_Bitmap` / `Load_Reports_Opaque_When_Al
 
 面向使用者的版本（三层结论的语义、失效时机表、性能量级、9 条注意事项）写在
 README 的「半透明像素：判断依据、性能与注意事项」一节，这里只留实现视角的记录。
+
+---
+
+## 11. 第五批：软后端解码零拷贝 + 光栅兜底
+
+> 两条互不依赖的线：
+> **A** 软后端 `Decode` 不再生成中间缓冲（解压直写帧内存 + 原地预乘 + 真正能命中大块的缓冲池）；
+> **B** 后端不支持的那一次操作，交给自带光栅器生成一张小贴图再合成回去（可选装饰器，**不动 SPI**）。
+> 基线 305 通过。
+
+### 11.0 现状（已核对源码）
+
+`ImageBackendBase.Decode`（`Defaults/ImageBackendBase.cs:192-241`）目前碰全图三次：
+
+1. `ArrayPool<byte>.Shared.Rent(stride * height)` → `TryDecodeInto` 解成直通 RGBA（缓冲 A）；
+2. `Import` → `Create(w, h, null)` 里 `new byte[w * h * 4]`（缓冲 B，创建即清零）;
+3. `ImportPixels` 逐行 `PixelOps.Premultiply` 把 A 预乘进 B，然后 `finally` 归还 A。
+
+1080p 就是「解一次 + 新建 8 MB（清零）+ 读 8 MB + 写 8 MB」。带 EXIF 方向时更糟：
+`PixelTransforms.ApplyOrientation` 再返回一个新 `byte[]`（缓冲 C），又 `Import` 一次（缓冲 D）。
+
+另外两个已核对的事实：
+
+- **现在的"池化"在 1080p 上等于没池化**：`ArrayPool<byte>.Shared` 的最大桶是 2^20 元素，
+  超过就每次新分配、`Return` 直接丢弃。软后端所有 `Share.Rent(stride * height)` 都落在这条路上。
+- `PixelOps.PremultiplyInPlace` 已存在（`PixelOps.cs:65`，内核本身允许源目标同址），
+  `Canvas.FlipHorizontal/FlipVertical/Rotate90/180/270` 也都在；缺的只是"Canvas 接管一块池化缓冲、
+  Dispose 时归还"这条路（`Canvas` 的类注释早就写了"便于零拷贝包装解码缓冲"）。
+- Sdcb `Abstractions` 2.0 的 `PixelFormat` 没有预乘变体（XML 文档里搜不到 `Premul`），
+  所以"解出来是直通像素"这一点改不掉，原地预乘这一步省不掉。落地时用反射再确认一次。
+
+### 11.1 A. 解码零拷贝
+
+目标：`Decode` 全程只有**一块**像素缓冲；解压直写这块内存，预乘原地做；稳定态 LOH 分配为 0。
+
+#### 11.1.1 `ByteBufferPool`（新文件 `Defaults/ByteBufferPool.cs`，internal）
+
+不复用 `ArrayPool<byte>.Shared`（它 1 MB 封顶），也不用公共池（大块进公共池会把内存钉在进程里）：
+
+- `Rent(int length)` 返回**精确长度**的数组（不做 2 的幂上取整，避免 8 MB 变成 16 MB）；
+- `Return(byte[])`：单块 ≤ 64 MB、池内总量 ≤ 64 MB，超了直接丢；`ConcurrentStack<byte[]>` 存放；线程安全；
+- `Trim()` / `PooledBytes` / `PooledCount`：与 `TensorBuffer`（§9.7）同一套诊断与清理入口。
+
+#### 11.1.2 `Canvas` 的所有权与池化
+
+- 新增 `internal static Canvas Adopt(byte[] buffer, int width, int height, int stride, bool returnToPool)`：
+  接管外部（池化）缓冲，内容必须已是预乘；`Dispose` 时按标记归还池，且只归还一次（`_disposed` 已经幂等）。
+- 新增 `internal static Canvas CreatePooled(int width, int height, Color? background = null)`：
+  只给"整幅都会被写满"的内部路径用（`Rotate90/180/270` 的返回值），不做公开。
+- `Create` / `Wrap` / `Clone` 的语义**不变**（`Clone` 仍 `new byte[]`，克隆出来的与池无关）。
+- **缓冲可能比 `Stride * Height` 长**：审计全部使用点。已知要改的一处是
+  `SoftwareBackend.Import` 的整块快路径——现在写的是 `PixelOps.Premultiply(straight[..], canvas.Buffer)`，
+  这个方法要求两块长度相等，池化后 `canvas.Buffer` 更长会直接 `ArgumentException`，
+  改成 `canvas.Buffer.AsSpan(0, rowBytes * canvas.Height)`。
+
+#### 11.1.3 `Decode` 改写
+
+```csharp
+byte[] buffer = ByteBufferPool.Rent(checked(stride * height));
+bool transferred = false;
+try
+{
+    Span<byte> pixels = buffer.AsSpan(0, stride * height);
+    if (!decodeInto(data, pixels, stride, SdcbPixelFormat.Rgba32, null, default)) { throw ...; }
+
+    PixelOps.PremultiplyInPlace(pixels);                       // 原地，第二次不再需要一块缓冲
+
+    Canvas canvas = Canvas.Adopt(buffer, width, height, stride, returnToPool: true);
+    transferred = true;                                        // 所有权已交出，finally 不再归还
+
+    canvas = ApplyOrientation(canvas, orientation, out int w, out int h);  // 见下
+    metadata = new ImageMetadata(MapFormat(info.Format), w, h, orientation, hasAlpha: info.Channels == 4);
+    return new SoftwareFrame(canvas);
+}
+finally
+{
+    if (!transferred) { ByteBufferPool.Return(buffer); }
+}
+```
+
+方向处理（`request.AutoOrient && orientation is > 1 and <= 8`）：
+
+| orientation | 做法 | 额外缓冲 |
+|---|---|---|
+| 2（水平镜像） | `canvas.FlipHorizontal()` 原地 | 无 |
+| 3（180°） | `canvas.Rotate180()` 原地 | 无（改造成原地：逐行交换 + 行内反转） |
+| 4（垂直镜像） | `canvas.FlipVertical()` 原地（复用一行 scratch） | 一行 |
+| 5..8（转置类） | `Rotate90/Rotate270` + 一次 `Flip*`，结果来自 `CreatePooled` | 一块（池化，无 LOH 分配） |
+
+顺序变化：以前是「先转直通像素、再预乘」，现在是「先预乘、再转预乘像素」。
+逐像素通道置换与预乘可交换，结果逐字节相同——写进注释并用用例守住。
+
+#### 11.1.4 用例（新增 `ByteBufferPool` 与解码路径）
+
+需要先给测试工程开内视：`src/ImageFacade.SdcbSimdCodecs/ImageFacade.SdcbSimdCodecs.csproj` 加
+`InternalsVisibleTo Include="ImageFacade.SdcbSimdCodecs.Tests"`（现在只对两个 OpenCV 后端开）。
+
+- `Decode_Still_Matches_Png_RoundTrip`：现有 PNG 往返用例原样保留（回归基线）。
+- `Decode_Does_Not_Allocate_LOH_In_Steady_State`：预热两次（解码 + Dispose）后，
+  1080p PNG 解码期间 `GC.GetAllocatedBytesForCurrentThread` < 64 KB（小对象不强制）。
+- `Decode_Reuses_Pooled_Buffer`：连续解码 + Dispose 三次，`ByteBufferPool.PooledCount` 稳定在 1，`PooledBytes` 不变大。
+- `Decoded_Frame_Survives_Other_Decodes`：A 帧解码后保留 → 再解 B 并 Dispose → A 的像素逐字节不变（池没串号）。
+- `Decode_Failure_Returns_Buffer_Exactly_Once`：头部合法但数据截断的 PNG 抛异常后，`PooledCount` 回到解码前的值。
+- `Decode_Applies_Exif_Orientation`：手工造一张带 APP1（`Orientation = 6`）的 JPEG，
+  解码结果与「直通解码 + `PixelTransforms.ApplyOrientation`」逐字节相等；2..8 全覆盖。
+- `Trim_Releases_Decode_Buffers`：`ByteBufferPool.Trim()` 后 `PooledBytes == 0`，随后解码仍正常。
+
+### 11.2 B. 核心自带光栅：把 `Rendering/` 搬进主包
+
+**不做装饰器、不做 fallback。** 光栅器是核心能力，后端缺什么就用自己的（核心的）绘制原语补，
+而不是外面套一层"试试看不行就换人"。
+
+#### 11.2.1 缺口清单（已核对）
+
+| 后端 | 现状 |
+|---|---|
+| Software | 全支持 |
+| Skia | 全支持（形状 / 虚线 / 半透明 / 文字） |
+| ImageSharp | 全支持（虚线走 `PatternPen`，半透明由 ImageSharp 合成） |
+| **OpenCV** | `color.A < 255` 的 `Fill/Draw/Line` 与**所有虚线**一律 `return false`（`CanDraw` + `Style.HasDash`，`OpenCvBackend.cs:265-405`），门面抛 `FeatureNotSupportedException` |
+
+今天真正被卡住的只有 **OpenCV 的半透明形状与虚线**；其余后端没有缺口。
+
+#### 11.2.2 搬迁清单（纯机械，零第三方依赖）
+
+`src/ImageFacade.SdcbSimdCodecs/Rendering/` 共 **39 个文件、约 4500 行**，只依赖 BCL
+（`System.Numerics` 的 `Matrix3x2`、`Vector128` 加速路径），**完全不引用 Sdcb / 任何编解码类型**
+（已逐个文件核对 `using`）。所以可以原样搬：
+
+| 项 | 变化 |
+|---|---|
+| 物理路径 | `src/ImageFacade.SdcbSimdCodecs/Rendering/**` → `src/ImageFacade/Rendering/**` |
+| 命名空间 | `ImageFacade.SdcbSimdCodecs.Rendering` → `ImageFacade.Rendering`（39 个文件一次性替换） |
+| 可见性 | 保持不变（`Canvas`、`Color`、`PixelOps`、`RowBlender`… 仍是 `internal`；核心内部谁都能用） |
+| 依赖 | 无新增 `PackageReference`；核心仍是零第三方依赖，`IsAotCompatible` 不变（`Vector128` 在 net8 就有） |
+
+**这是核心包定位的公开变化**：`ImageFacade.csproj` 的 Description 现在写"不含任何编解码或渲染依赖"、
+plan §1.3 / §7 也这么写。本批之后改成"**自带 CPU 光栅（无编解码、零第三方依赖）**"，
+并说明为什么值得：光栅器只有一份，四个后端 + 无后端的裸用场景（§13）共用，不再各自实现。
+
+#### 11.2.3 核心新增：`RasterBackend` / `RasterFrame`（都 internal，**不新增公开类型**）
+
+**为什么不直接把 `Canvas` 给用户**：`Canvas` 现在是 `internal sealed`，它的参数与返回值用到
+`Color`、`Rectangle`、`IPath` / `PathBuilder`、`Pen`、`LineCap` / `LineJoin`、`IBrush`、
+`ResizeOptions` 等——`Rendering/` 里**除了 `RasterBackend` 全是 internal**（已逐个核对）。
+公开 `Canvas` 等于一次性公开 40 个图形学内部类型，还要把
+`Buffer`（裸 `byte[]`）、"预乘存储"、`Wrap` / `Adopt` 的缓冲所有权立成永久合同；
+而核心已经有 `Rgba32` / `RectF` / `Drawing.StrokeStyle` 这套公开模型，会变成两套并存、且收不回来。
+所以**不公开 `Canvas`**，绘图能力只经已有门面暴露：
+
+```csharp
+// src/ImageFacade/Rendering/RasterBackend.cs —— internal
+internal sealed class RasterBackend : IImageBackend
+{
+    public string Name => "raster";   // 只出现在异常消息里，不是公开概念
+    // Create / Clone / Clear / TryGetPixel / TryCopyPixels / ImportPixels / Resize / Draw* / Measure*
+    // 全部实现：直接调 Rendering 里的 Canvas / DrawingContext / Resizer / TextDrawing
+
+    // 编解码：没有——核心不带任何 codec
+    public IReadOnlySet<ImageFormat> SupportedDecodeFormats => FrozenSet<ImageFormat>.Empty;
+    public IFrame Decode(...) => throw new FeatureNotSupportedException(Name, "核心光栅不带编解码……");
+    public void Encode(...) => throw new FeatureNotSupportedException(...);
+
+    // 本批**不做**「直接接管外部缓冲」：wrap: true 静默退化为一次拷贝（ImportPixels 顺手预乘）。
+    // 真零拷贝要把 Canvas 的存储从 byte[] 改成 Span<byte>，等有实际性能诉求时再开（见 §13.7）。
+    public bool TryWrapPixels(IntPtr pixels, int width, int height, int stride, bool ownsMemory, out IFrame frame);
+}
+
+internal sealed class RasterFrame : IFrame   // 现在的 SoftwareFrame，改名并在核心落地
+```
+
+**用户侧唯一的新增公开入口是一行构造**：
+
+```csharp
+// src/ImageFacade/ImageEngine.cs
+/// <summary>用核心自带的光栅器建引擎：不编解码，只负责建图 / 画 / 交像素。</summary>
+public ImageEngine() : this(new RasterBackend(), ownsBackend: true) { }
+```
+
+于是"裸用核心"的代码里不出现任何后端类型（§13 的例子就是这样写的）：
+
+```csharp
+var engine = new ImageEngine();                                   // 自带光栅
+using var img = engine.Create(1920, 1080, Rgba32.Black);          // 输入
+img.DrawText("hello", new PointF(16, 16), TextStyle.Default);     // 画
+img.CopyPixelsTo(destPtr, stride, PixelFormat.Bgra32);            // 输出
+```
+
+`ImageEngine.Default` 仍是"必须显式赋值、不做自动探测"，无参构造只是显式选择核心光栅，语义一致。
+
+`RasterBackend` 保持 internal 够用的原因：全仓只有 **OpenCV 4/5** 需要复用它画（已有
+`InternalsVisibleTo`），Sdcb 包也有内视；第三方要写自己的后端，实现 `IImageBackend` 即可，我们不把
+"内部光栅实现"当成公开扩展点。
+
+`Capabilities` = `Resize | DrawShapes | DrawPoints | DrawText | DrawTextUnicode | AlphaBlending | Dash | ExifOrientation | AotCompatible`
+（**不含** `LossyEncode`：那是 Sdcb 包的能力）。
+
+`Name` 用 `"raster"` 而不是 `"software"`：`"software"` 已经被 `SoftwareBackend`（带编解码）占用，
+不能改（公开 API）。
+
+#### 11.2.4 Sdcb 包收缩为"编解码一层皮"（组合，不是继承）
+
+| 现在 | 之后 |
+|---|---|
+| `ImageBackendBase : IImageBackend`（309 行，编解码 + 6 个 abstract + 一堆 `return false`） | `public abstract class ImageBackendBase : IImageBackend`（约 230 行）：`private readonly RasterBackend _raster = new();`，6 个 abstract（`Create`/`Clone`/`Clear`/`TryGetPixel`/`TryCopyPixels`/`ImportPixels`）改成 override 转发，`TryResize`/`TryDraw*`/`TryMeasureText`/`TryAcquirePixels`/`TryGetTransparency`/`TryWrapPixels` 也转发；只留 codec 注册 / `Decode` / `Encode` / `Supported*` 与 `Name`/`Version`/`Capabilities` 的 abstract |
+| `SoftwareBackend : ImageBackendBase`（438 行，绘制全在里面） | `public sealed class SoftwareBackend : ImageBackendBase`（约 40 行：`Name`、`Version`、`Capabilities + LossyEncode`） |
+| `SoftwareFrame`（15 行，internal） | 删除，统一用核心 `RasterFrame` |
+
+**为什么用组合而不是 `: RasterBackend`**：`RasterBackend` 是 internal，而 `SoftwareBackend` 是 public，
+public 类型不能继承 internal 基类（CS0060：基类的可访问性不得低于派生类）。组合还有额外好处：
+`ImageBackendBase` 的 6 个 abstract 变成有默认实现，下游自建后端只要实现 `Name`/`Version`/`Capabilities`
+就能跑绘制，属于非破坏性的负担减轻。
+
+公开 API 不变：`ImageBackendBase.RegisterCodec / RegisterDecoder / RegisterEncoder / ClearCodecs` 全部保留，
+`SoftwareBackend` 的类名、`Name => "software"`、`LossyEncode` 能力位都不变 → 使用方一行代码不用改。
+帧类型是 `internal` 且只经 `IFrame` 暴露，所以也没人能看到 `SoftwareFrame` 的消失。
+
+#### 11.2.5 缺能力怎么补：后端内部用核心光栅（不是外层装饰器）
+
+只改 **OpenCV 两个后端**（4/5 共用一份源码），每个原本 `return false` 的分支改成"自己画"：
+
+```csharp
+// OpenCvBackend.cs 内部
+private static readonly RasterBackend Raster = new();   // 无状态，进程内共享一份
+
+public override bool TryFillPolygon(IFrame frame, in PolygonSpec spec)
+{
+    if (spec.Style.Color.A == 255)
+    {
+        return FillPolygonOpaque(frame, spec);          // 原有 CV 路径，一个字节都不多搬
+    }
+
+    // 半透明：用核心光栅画一小块，再合成回这张 Mat
+    return RasterCompose.Paint(this, frame, Bounds(spec),
+        (target, dx, dy) => Raster.TryFillPolygon(target, Translate(spec, dx, dy)));
+}
+```
+
+`Raster` 是核心的 internal `RasterBackend`（§11.2.3），靠已有的 `InternalsVisibleTo` 在 OpenCV 包里可见。
+`RasterCompose.Paint`（核心 `ImageFacade.Rendering` 里的 `internal static` 助手）负责固定的四步：
+
+1. bbox 与帧矩形求交，空则直接返回 `true`（本来就没有像素会变）；
+2. `Raster.Create(bw, bh, null)` → 把 spec 按 `-bbox.TopLeft` 平移后画上去；
+3. `Raster.TryCopyPixels(temp, rented, bw * 4)` 取回直通 RGBA（缓冲走 §11.1 的 `ByteBufferPool`）；
+4. 写回目标帧：优先 `target.TryAcquirePixels(frame, out lease)`，否则
+   `TryCopyPixels` 全图 + `ImportPixels` 回来；在 bbox 内做 source-over，`aOut = aS + aD*(1-aS)`。
+
+**为什么不再要装饰器**：装饰器要"先试 inner、失败再换人"，能力位只能声明"不支持"，
+用户还得知道有这层、还得配 `Shapes/Text` 开关、还得处理 `FallbackCount`；而能力其实是这个后端**真实拥有**的，
+就该在 `Capabilities` 里如实声明 `AlphaBlending | Dash`，门面照常画，没有第二套语义。
+
+**为什么不能 `TryDrawFrame` 贴上去**：`IFrame` 是后端私有类型，核心的 `RasterFrame` 丢给
+`OpenCvBackend.TryDrawFrame` 必然 `InvalidCastException`。像素通道
+（`TryAcquirePixels` / `TryCopyPixels` + `ImportPixels`）是唯一合法的跨后端通道。
+
+#### 11.2.6 命名冲突清单（搬迁前必须处理）
+
+核心已有 `ImageFacade.PointF`、`Size`、`ResizeOptions`、`ImageFacade.Drawing.StrokeStyle`，
+`Rendering/` 里也有同名类型（不同命名空间）。规则：
+
+- 公开面**不新增**这些名字的歧义：`Rendering` 下所有类型保持 `internal`（`PointF`/`Size`/`Rectangle`/
+  `StrokeStyle`/`ResizeOptions`/`Canvas`/`RasterBackend`/`RasterFrame` 一个都不公开，见 §11.2.3）；
+- 核心内部 `RasterBackend.cs` 同时用到 `ImageFacade.Backends.*`（`PointF`、`ResizeRequest`）和
+  `ImageFacade.Rendering.*`（`PointF`、`Size`、`ResizeOptions`）→ 用 4 个 `using` 别名；
+- `ImageFacade.SdcbSimdCodecs` / `OpenCv*` 里同理，别名写在文件头，不用全局 using。
+
+#### 11.2.7 精度与成本
+
+- 合成在**直通 RGBA** 空间，半透明像素与"原生就用光栅画"逐字节一致；不透明像素走原路径，完全不经过光栅。
+- OpenCV 一次补齐 = 全图 RGBA↔BGRA 往返（1080p 1 ms 级）+ bbox 合成。**这是"正确性优先"路径**：
+  每帧都走到这里，说明要么换后端，要么改用不透明色 / 实线（写进 README）。
+- 支持的操作零额外开销（不透明形状、实线、文字仍走 CV 原路径）。
+
+#### 11.2.8 用例
+
+核心（`tests/ImageFacade.Tests`，已开内视）：
+
+- `Raster_Creates_Draws_And_Exports`：搬过来的回归基线（`Create`/`Clear`/`GetPixel`/`CopyPixels`）。
+- `Raster_TryWrapPixels_Returns_False`：本批不开零拷贝，`wrap: true` 走拷贝 + 预乘，结果与 `wrap: false` 逐字节相等。
+- `Raster_Without_Codecs_Throws_On_Decode`：`Decode`/`Encode` 抛 `FeatureNotSupportedException`。
+- `RasterCompose_Paints_Only_Inside_Box`：bbox 外像素逐字节不变；完全在画外时返回 `true` 且零改动。
+- `ImageEngine_DefaultConstructor_Draws_And_Exports`：`new ImageEngine()` → `Create` → `DrawText` →
+  `CopyPixelsTo` 全链路可用（用户侧唯一入口，不出现任何后端类型）。
+- `Public_Api_Gains_No_New_Backend_Type`：反射扫 `ImageFacade` 程序集的公开类型，
+  断言 `RasterBackend`/`RasterFrame`/`Canvas` 都不在其中（代替"不新增公开类型"的口头约定）。
+
+OpenCV（`tests/ImageFacade.OpenCv4.Tests` + `OpenCv5` 同一份源码）：
+
+- `OpenCv_Draws_Dashed_Line`：带 `DashPattern` 的 `DrawLine` 不再抛；与 `RasterBackend` 画的同一笔对比，容差 ≤ 3。
+- `OpenCv_Blends_SemiTransparent_Fill`：`(255,0,0,160)` 压在不透明蓝底上 ≈ `(160R + 95B)/255`，容差 2。
+- `OpenCv_Capabilities_Advertise_AlphaBlending_And_Dash`：能力位如实声明（不是"不支持 + 外挂"）。
+- `OpenCv_Offscreen_Geometry_Is_NoOp`：一半在画外不抛、不越界写；完全画外时像素不变。
+
+软后端（`tests/ImageFacade.SdcbSimdCodecs.Tests`）：原有绘制用例全部保留（搬走实现但行为不变，就是回归）。
+
+### 11.3 执行顺序
+
+1. 本节进 `planv2.md`。
+2. **A1**：`ByteBufferPool` + `Canvas.Adopt/CreatePooled` + `Dispose` 归还 + `SoftwareBackend.Import` 长度修正 →
+   `dotnet test` 全绿（这一步**不改** `Decode`，单独可回滚）。
+3. **A2**：`Decode` 直写 + 原地预乘 + 方向处理 + 7 个新用例 → 全绿；顺手记录实测耗时。
+4. **B1（纯搬迁）**：`Rendering/` 整目录移到核心 + 命名空间替换 + 4 个别名 → 只改路径不动逻辑，
+   构建通过、软后端用例全绿（这一步单独可回滚，是后面所有事情的地基）。
+5. **B2（拆类）**：核心 internal `RasterBackend` + `RasterFrame` + 公开入口 `ImageEngine()` →
+   `ImageBackendBase` 改为组合转发并缩身 → `SoftwareBackend` 只剩 40 行 → 删 `SoftwareFrame`；用例全绿。
+   （`TryWrapPixels` 本批返回 false，`wrap: true` 退化拷贝；真零拷贝见 §13.7 待办。）
+6. **B3（补能力）**：`RasterCompose` 助手 + OpenCV 4/5 内部补齐（半透明形状、虚线）+ 能力位如实声明 +
+   新用例（虚线/半透明/画外几何/能力位）。
+7. **B4（例子）**：按 §13 做 `samples/ImageFacade.AvaloniaDemo`（ffmpeg → `WriteableBitmap`），
+   验证核心包脱离任何后端/编解码也能用。
+8. README：解码那段补"零拷贝"一句；新增「核心自带光栅」一节与「不支持的操作：后端内部补齐」一节；
+   改第 39 行「后端互不兜底」、第 318 行 OpenCV 那句、核心包"不含渲染"的定位描述与 plan §1.3 / §7；
+   能力矩阵补一行「核心光栅（`new ImageEngine()`，不引任何后端包）」；文档里**不出现** `RasterBackend` 这个名字
+   （它是 internal，用户只需要 `ImageEngine`）。
+9. 最后全量 `dotnet build ImageFacade.slnx -c Release` + `dotnet test`，把实测数据写回本节。
+
+### 11.4 验收
+
+- [ ] 构建 0 警告 0 错误（各工程 `TreatWarningsAsErrors=true`）。
+- [ ] 测试全绿（基线 305，预计 +20 ~ +24），六个测试工程都跑。
+- [ ] A：1080p PNG / JPEG 解码稳定态 LOH 分配为零（`GC.GetAllocatedBytesForCurrentThread` < 64 KB）。
+- [ ] A：连续 100 次"解码 + Dispose"后 `ByteBufferPool.PooledBytes` 不超过 64 MB 上限，`Trim()` 后归零。
+- [ ] A：EXIF 方向 2..8 的解码结果与改前逐字节相等。
+- [ ] A：改前 / 改后 1080p PNG、4K JPEG 解码耗时对比表（Release，100 次均值）。
+- [ ] B：`Rendering/` 全部 39 个文件只在核心一份，Sdcb 包里不再有 `Rendering` 目录（`git grep` 为零）。
+- [ ] B：核心包仍**零第三方依赖**、`net8.0` 可编译、`IsAotCompatible` 不变；`SoftwareBackend` 的公开 API 一个不少。
+- [ ] B：OpenCV 虚线 / 半透明形状不再抛，与核心光栅输出容差 ≤ 3；不透明路径像素与改前逐字节相等。
+- [ ] B：OpenCV 的 `Capabilities` 如实包含 `AlphaBlending | Dash`（不再依赖外挂声明）。
+- [ ] B：`new ImageEngine()` 全链路可用（`Create` → `DrawText` → `CopyPixelsTo`）；
+  `wrap: true` 退化为拷贝，结果与 `wrap: false` 逐字节一致。
+- [ ] B：`ImageFacade` 程序集的**公开类型清单没有新增**（`Canvas`/`RasterBackend`/`RasterFrame` 都是 internal）。
+- [ ] B：`samples/ImageFacade.AvaloniaDemo` 不引 Sdcb / Skia / OpenCV，1080p30 稳定。
+
+### 11.5 本批不做
+
+| 项 | 原因 |
+|---|---|
+| `Encode` / `TryAcquirePixels` / `TryDrawFrame` 的缓冲换成 `ByteBufferPool` | 同一模式但会铺开改动面；先让 `Decode` 单独可回归 |
+| 帧池（`Create` 出来的帧也池化） | 生命周期由调用方掌握，池化会把"忘 Dispose"变成额外内存泄漏 |
+| 重名类型合并（`Rendering.PointF/Size/ResizeOptions` 并入 `ImageFacade.*`） | 纯搬迁风险已经够大；合并要动几百处调用点，单独一轮（§11.2.6） |
+| 公开路径模型 `FillPath(IPath, ...)` | 核心现在有 `IPath` 了，但 SPI 加接口会影响所有第三方后端；先让后端内部用 `RasterCompose` |
+| 按 bbox 局部导出 / 导入（`TryCopyPixels(rect, ...)`） | 需要扩 SPI；现在用全图往返顶着，等 §13 的实测数据再决定 |
+| `TryWrapPixels` 真零拷贝（§7 第 7 条） | 本批不做，核心与其他后端一起延后（§13.7） |
+
+---
+
+## 12. 第六批：SimdSkia 后端（`ImageFacade.SimdSkia`）
+
+> 目标：再加一个**纯托管、零原生依赖**的 2D 后端，复用现有 `SkiaBackend.cs` 那份源码，不重写一遍。
+
+### 12.0 上游调研（nuget.org/packages/SimdSkia，0.1.6）
+
+| 项 | 情况 |
+|---|---|
+| 定位 | **SkiaSharp 的源码兼容门面**：直接暴露 `SkiaSharp` 命名空间与 `SKBitmap` / `SKCanvas` / `SKPaint` / `SKFont` / `SKPath`，基线对齐 SkiaSharp **3.119.4** 的"已实现子集"（公共签名 3230/3235，类型 201，仍留 5 项原生合同缺口） |
+| 实现 | 纯 C# + 通用 SIMD 光栅/合成（`SimdSkia.Core/Cpu`），文字是托管静态 glyf TrueType 解析（`SimdSkia.Text`），编解码直接用 **Sdcb.SimdCodecs 2.0.0**（`SimdSkia.Imaging`） |
+| 依赖 | `SimdSkia.Compatibility >= 0.1.6`；三方 `Sdcb.SimdCodecs 2.0.0`、`Clipper2 2.0.0`。**与核心已用的 `Sdcb.SimdCodecs.Abstractions 2.0.0` 同版本，不冲突** |
+| TFM | **只 `net10.0`**（连 `-android/-browser/...` 都是 NuGet 推导值） |
+| 许可 | MIT（© 2026，13 个包统一版本号） |
+| 缺口 | 无 complex shaping、无 CFF/可变/彩色字体、无 hinting；画质/性能与原生 Skia 仍有差距；JPEG 编码质量不如 libjpeg |
+| GPU | Windows Direct2D/D3D11、Linux Vulkan（回读模式）/GL、Metal 未验证 |
+| AOT | 未声明 NativeAOT 支持，只有 Android 16 ARM64 的 **Mono AOT** 实机验证 |
+| 成熟度 | 0.1.x，总下载 ~1.5K，当前版 0 下载，无下游依赖 → **按实验性对待，版本钉死** |
+
+### 12.1 策略：源码链接，不重写
+
+`SkiaBackend.cs` 只有 668 行，用到的 `SK*` 面已经不宽（见 12.2 清单）。所以走 **ImageSharp / ImageSharp2 那条老路**：
+新工程链接同一份源码，两处差异用 `DefineConstants` 隔离。
+
+```xml
+<!-- src/ImageFacade.SimdSkia/ImageFacade.SimdSkia.csproj -->
+<PropertyGroup>
+  <Version>0.4.0</Version>
+  <TargetFramework>net10.0</TargetFramework>            <!-- 上游只 net10.0 -->
+  <AssemblyName>ImageFacade.SimdSkia</AssemblyName>
+  <RootNamespace>ImageFacade.SkiaSharp</RootNamespace>   <!-- 与 ImageSharp2 同款：命名空间跟源码走，不跟工程名 -->
+  <DefineConstants>$(DefineConstants);SIMDSKIA</DefineConstants>
+  <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+</PropertyGroup>
+<ItemGroup>
+  <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
+  <PackageReference Include="SimdSkia" />
+</ItemGroup>
+<ItemGroup>
+  <Compile Include="..\ImageFacade.SkiaSharp\**\*.cs"
+           Exclude="..\ImageFacade.SkiaSharp\bin\**;..\ImageFacade.SkiaSharp\obj\**"
+           Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+</ItemGroup>
+```
+
+结果：两个包的**类型全名完全相同**（`ImageFacade.SkiaSharp.SkiaBackend`），使用方换包不用改代码。
+代价也和老规矩一样：**`Sevencat.ImageFacade.SkiaSharp` 与 `Sevencat.ImageFacade.SimdSkia` 互斥**
+（同一个 `SkiaSharp` 命名空间被两个程序集实现，同工程共存必然 `CS0433`）。README 必须写死这一条。
+
+### 12.2 第一步是"对账"，不是"写代码"
+
+已核对的 `SkiaBackend.cs` 依赖面（对账时按这张表逐个消）：
+
+| 用途 | 用到的成员 |
+|---|---|
+| 帧 | `SKBitmap(SKImageInfo)`、`Bitmap.GetPixels()/PeekPixels()/Info/RowBytes`、`SKColorType.Rgba8888`、`SKAlphaType.Premul`、`SKCanvas.Clear/DrawBitmap/DrawRect/DrawPath/DrawText/DrawLine/DrawPoints` |
+| 解码 | `SKData.CreateCopy`、`SKCodec.Create`、`codec.Info`、`codec.GetPixels(SKImageInfo, IntPtr)`、`SKCodecResult.Success/IncompleteInput` |
+| 编码 | `SKImage.FromBitmap`、`image.Encode(SKEncodedImageFormat, int)`、`SKData.SaveTo` |
+| 像素搬运 | `new SKPixmap(SKImageInfo, IntPtr, stride)`、`pixmap.ReadPixels(...)`、`bitmap.InstallPixels`（等价替身） |
+| 路径 | `SKPath` 写 API、`SKPathEffect.CreateDash`、`SKStrokeCap/Join` |
+| 文字 | `SKTypeface.FromData(SKData)` / `SKTypeface.Default`、`SKFont(SKTypeface, float)`、`font.Metrics`、`font.MeasureText(ReadOnlySpan<char>)`、`SKFont.Edging`、`SKTextAlign` |
+| 缩放 | `SKSamplingOptions`、`SKFilterMode`、`SKMipmapMode` |
+
+缺成员的处置顺序（**不许猜 API**）：
+
+1. 语义等价改写（如 `SKPixmap.ReadPixels` → `SKBitmap.InstallPixels`）→ 直接改，`#if SIMDSKIA` 隔离；
+2. 实在没有的（某个 `SKCodecResult` 分支、某个 paint 字段）→ **能力位降级**（`return false`），
+   由 §11.2 的 `RasterFallbackBackend` 兜底；
+3. 都做不到 → 该能力在 SimdSkia 后端明确不支持并写进 README，**绝不静默给错结果**。
+
+共享源码目前**一个 `#if` 都没有**（已确认），本批会加进第一批：`Name`（`"skia"` / `"simdskia"`，
+异常消息与日志要能分辨）和 `Capabilities` 里的 `AotCompatible`（上游未声明 NativeAOT，能力位要摘）。
+
+### 12.3 已知行为差异（用例与 README 都要钉住）
+
+| 点 | SkiaSharp | SimdSkia | 处理 |
+|---|---|---|---|
+| 编解码 | 自带 SKCodec，6 种格式 | 走 Sdcb codec（**按需注册**） | `SupportedDecodeFormats/EncodeFormats` 取"实际能建 codec 的格式"；未注册的格式抛 `FeatureNotSupportedException` 而不是笼统的"无法识别" |
+| 文字 | HarfBuzz 整形 + 系统字体 | 静态 glyf 解析、无整形/无 hinting | 内置文泉驿是**静态 glyf**，中文可用；度量与原生 Skia 有 ±1px 级差，比对用例容差 3 |
+| 像素布局 | 显式 `Rgba8888 + Premul` | 默认 N32 预乘（门面已校正） | 代码里本来就显式传 `Rgba8888 + Premul`；再加一条**运行时断言**：`ColorType/AlphaType` 不符就抛清晰异常，不带着错的布局往下算 |
+| JPEG / WebP 画质 | libjpeg / skia | Sdcb 实现 | 编码用例按"视觉接近"判（沿用 `Jpeg_RoundTrip_Is_Visually_Close` 的容差思路） |
+| GPU | — | 有，但不要把不确定性引进来 | **只走 CPU 光栅**（画到 `SKBitmap`），不引 `SimdSkia.Gpu*`；GPU 对象还要求创建线程 Dispose，和我们的帧生命周期模型冲突 |
+| AOT | 需 RID 原生资产 | 纯托管但未声明 AOT | 能力位摘掉 `AotCompatible`；NativeAOT 实测留作后续结论 |
+
+### 12.4 用例：顺手把 Skia 后端一直缺的测试补上
+
+现状：`tests/` 下只有 core / ImageSharp×2 / OpenCV×2 / Sdcb 六个工程，**SkiaSharp 后端没有测试工程**（只有 samples 出图）。
+本批一次补齐两个：
+
+- `tests/ImageFacade.SkiaSharp.Tests`：新建 `SkiaBackendTests.cs`（引用 `SkiaSharp` + `SkiaSharp.NativeAssets.Win32`）；
+- `tests/ImageFacade.SimdSkia.Tests`：`Compile Include="..\ImageFacade.SkiaSharp.Tests\SkiaBackendTests.cs"` 链接同一份源码，
+  引用 `ImageFacade.SimdSkia`，**不引任何原生资产**（这本身就是"零原生依赖"的验收手段）。
+
+用例内容（约 25 个）：`Create/GetPixel` 往返、`Clear`、直线/矩形/椭圆/多边形（描边 + 填充）、虚线、
+半透明叠加、中文文字 + 折行 + `MeasureText` 与墨迹一致、Resize 六模式、`CopyPixels(Bgra)`、非紧凑 stride 的
+`FromPixels`、PNG/JPEG 往返、`Decode` 的 `HasTransparency`、Dispose 后再用抛异常、`ColorType/AlphaType` 断言。
+
+SimdSkia 侧需要注册 Sdcb codec：直接链接 `tests/ImageFacade.SdcbSimdCodecs.Tests/TestCodecs.cs`（注册是进程级，
+PNG/JPEG/BMP 三个足够），避免再抄一份。
+
+### 12.5 构建与打包改动清单
+
+1. `Directory.Packages.props`：`<PackageVersion Include="SimdSkia" Version="0.1.6" />`（**钉死**，13 个 `SimdSkia.*`
+   必须同版本；只引门面包 `SimdSkia`，它会把 Core/Cpu/Text/Imaging/Compatibility 拉齐）。
+2. `ImageFacade.slnx`：加 `src/ImageFacade.SimdSkia` 与两个测试工程。
+3. 新包 `Sevencat.ImageFacade.SimdSkia`：`<Version>0.4.0</Version>`，Description 写明
+   "实验性、纯托管、仅 net10.0、依赖 SimdSkia 0.1.x 子集"。
+   同批把**全部 8 个包统一到 `0.4.0`**，见 12.5.1。
+4. `THIRD-PARTY-NOTICES.txt`：补 SimdSkia（MIT）+ 其链式依赖 `Sdcb.SimdCodecs`、`Clipper2`。
+5. README：
+   - 徽章/包表加一行 `SimdSkia`；
+   - 「后端」表加一行（`SimdSkiaBackend`？不——类型名仍是 `SkiaBackend`，包名不同）；
+   - 能力矩阵加一列；
+   - 显式写两条约束：**与 `SkiaSharp` 包互斥**、**编解码要先注册 Sdcb codec**；
+   - 「换一行构造代码」那段示例补 `new ImageEngine(new SkiaBackend())` 用任一包皆可；
+   - 版本相关行按 12.5.1 改成 `0.4.0`。
+
+#### 12.5.1 版本收口：全部统一到 `0.4.0`
+
+现在是 `ImageFacade` 0.3.1、其余 0.3.0（README 第 61/65/66 行的"七个包 `0.3.0`"写的就是这个基线）。
+本批两件事都够一个 minor（§11 的 OpenCV 虚线/半透明从**抛异常**变成**能画**，这是行为变化；
+§12 直接多一个包），所以本次发布把 8 个包**一起抬到 `0.4.0`**，不再保留"核心 0.3.1、其余 0.3.0"的参差。
+
+改动点（全部是纯文本，`Directory.Build.props` 的 `<VersionPrefix>0.3</VersionPrefix>` 只是兜底，也要跟着改）：
+
+| 位置 | 改成 |
+|---|---|
+| `Directory.Build.props` 的 `<VersionPrefix>` | `0.4` |
+| `src/ImageFacade/ImageFacade.csproj` | `<Version>0.4.0</Version>` |
+| 其余 6 个既有后端 csproj | `<Version>0.4.0</Version>` |
+| 新工程 `src/ImageFacade.SimdSkia` | `<Version>0.4.0</Version>` |
+| README 第 61 行 | "八个包……当前版本 `0.4.0`" |
+| README 第 65-66 行安装示例 | `Version="0.4.0"` |
+| README 第 73 行 | "`0.4.0` 是当前八个包统一的基线" |
+| README 第 86 行 | 安装示例里的 `Version="0.4.0"` |
+
+注意两点：
+
+- `SimdSkia` **上游**版本（0.1.6）与我们的包版本无关，只钉在 `Directory.Packages.props` 里，别混进 README 的版本叙事；
+- 版本抬升放在**本批最后一步、`dotnet pack` 之前**（12.6 第 7 步），中途构建日志里的版本号不影响任何用例。
+
+### 12.6 执行顺序
+
+1. 本节进 `planv2.md`。
+2. 建工程 + 中央版本 + 链接源码 → `dotnet build` **对账**，把所有缺口列成清单（先不修，只记录）。
+3. 按 12.2 的三级处置补齐/隔离，跑到 0 警告；同时加 `Name` / `Capabilities` 两个 `#if`。
+4. `tests/ImageFacade.SkiaSharp.Tests` 先绿（补历史缺口，与 SimdSkia 无关也要绿）。
+5. `tests/ImageFacade.SimdSkia.Tests` 链接同一份用例 → 绿（差异按 12.3 的容差判）。
+6. 实测对比写回本节：画 1000 段线、画一段中文、Resize 1080p→640、PNG 编解码，各 100 次均值 + 分配。
+7. **版本收口（12.5.1）**：`VersionPrefix` → `0.4`、8 个 csproj → `0.4.0`、README 版本行同步；
+   随后 `dotnet pack` 检查 nuspec 里全是 `0.4.0`。
+8. README / notices 收尾，最后全量 `dotnet build ImageFacade.slnx -c Release` + `dotnet test`。
+
+### 12.7 验收
+
+- [ ] 8 个 src 工程 0 警告 0 错误（`TreatWarningsAsErrors`），8 个包都能 `dotnet pack`。
+- [ ] 8 个包 nuspec 版本统一为 `0.4.0`，`VersionPrefix` 为 `0.4`，README 不再出现 `0.3.0` 基线。
+- [ ] 同一份 `SkiaBackendTests.cs` 在两个测试工程全绿（差异只在 12.3 的容差内）。
+- [ ] SimdSkia 侧**无原生依赖**：把测试输出目录里的 `libSkiaSharp*` 全删掉再跑一遍仍然绿。
+- [ ] `SK*` 缺口清单归档进本节：哪些等价改写、哪些降级为能力位、哪些明确不支持。
+- [ ] 性能对比表（SkiaSharp vs SimdSkia，同一场景）。
+- [ ] SimdSkia 后端默认 `Capabilities` 不含 `AotCompatible`；NativeAOT 实测只记录结论，不在本批承诺。
+
+### 12.8 本批不做 / 风险
+
+| 项 | 原因 |
+|---|---|
+| GPU 路径（Direct2D / Vulkan / GL） | 我们只画到 `SKBitmap`；GPU 资源要求创建线程 Dispose，与帧生命周期模型冲突 |
+| 复杂文字整形（阿拉伯 / 印度语系） | 上游 `SimdSkia.Text` 就没有，这是包本身的边界，README 写明 |
+| SimdSkia 后端用核心光栅补缺口 | 对账若发现确有补不上的能力，就在 `SkiaBackend.cs` 里用核心光栅（§11.2）画：核心 csproj 的 `InternalsVisibleTo` 加 `ImageFacade.SimdSkia` 即可，**不引** `ImageFacade.SdcbSimdCodecs`；本批先不改，等对账单出来再定 |
+| 把 SimdSkia 放进默认推荐路径 | 0.1.6、1.5K 下载、画质/性能仍落后原生 Skia → 标实验性、版本钉死 |
+| samples 增加 SimdSkia 出图 | 出图脚本要动 `docs/images`，与本批目标无关 |
+
+---
+
+## 13. 例子：ffmpeg → Avalonia `WriteableBitmap`（只引核心包）
+
+> 这条链路的证明价值：**不解码、不编码、不画到文件**，所以不需要 Sdcb / Skia / OpenCV 任何包。
+> `Rendering/` 进核心（§11.2）之后，核心主包自己就能完成"接外部像素 → 画 → 交出像素"。
+
+### 13.1 为什么现在能做到（前置条件）
+
+| 能力 | 谁提供 | 现状 |
+|---|---|---|
+| 零拷贝接管外部缓冲 | 核心光栅的 `TryWrapPixels`（`new ImageEngine()` 背后的 internal `RasterBackend`） | **本批不做**：返回 false，`wrap: true` 退化成一次拷贝；真零拷贝见 §13.7 |
+| `FromPixels(ptr, …, wrap: true)` 落到 wrap 路径 | `ImageEngine.cs:364-393` | 已存在，后端返回 false 时退化成拷贝（本批正是这条路径） |
+| 画字 / 形状 / 半透明 / 虚线 | 核心 `Rendering` | 本批搬进来 |
+| 导出成 Avalonia 能吃的像素 | `FacadeImage.CopyPixelsTo(IntPtr, stride, PixelFormat.Bgra32)` | 已存在（`PixelFormat.Bgra32` 的注释就写着 "Avalonia `Bgra8888`"，`Bgra32Premultiplied` 对应 `AlphaFormat.Premul`） |
+
+### 13.2 工程
+
+```
+samples/ImageFacade.AvaloniaDemo/
+  ImageFacade.AvaloniaDemo.csproj   OutputType=WinExe, IsPackable=false
+  Program.cs / App.axaml / MainWindow.axaml(.cs)
+```
+
+- 依赖：`Avalonia` + `Avalonia.Desktop` + `Avalonia.Themes.Fluent`（12.x，与 SimdSkia 那边观测到的版本线一致）、
+  `ProjectReference ../../src/ImageFacade/ImageFacade.csproj`；
+- **不引** `Sdcb.SimdCodecs`、`SkiaSharp`、`OpenCvSharp`、`ImageSharp`（`dotnet list package` 要能自证）；
+- 加到 `ImageFacade.slnx` 的 `/samples/` 下。
+
+### 13.3 一帧的流程
+
+```
+ffmpeg -i in.mp4 -f rawvideo -pix_fmt rgba -          ← stdout 吐裸帧（直通）
+   ↓ 读满 w*h*4（一个循环复用的缓冲，不每帧分配）
+engine.FromPixels(ptr, w, h, stride, PixelFormat.Rgba32, wrap: true)   ← 本批退化：一次拷贝 + 预乘
+   ↓ 画 HUD：DrawText / DrawRectangle / FillPolygon（半透明、虚线都走核心光栅）
+image.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32)        ← 直通 Bgra，写进 WriteableBitmap
+   ↓ Source 重绑 / InvalidateVisual
+```
+
+骨架（只贴关键 20 行，细节实现时补）：
+
+```csharp
+var engine = new ImageEngine();                             // 核心自带光栅，不引任何编解码包
+
+// UI 线程：一次建好、逐帧复用
+var bitmap = new WriteableBitmap(new PixelSize(w, h), new Vector(96, 96),
+                                 Avalonia.PixelFormat.Bgra8888, AlphaFormat.Opaque);
+
+// UI 线程：wrap: true 本批退化成「拷贝 + 预乘」，外部缓冲照常复用
+fixed (byte* p = frames[latest])
+using (FacadeImage image = engine.FromPixels(p, w, h, stride, PixelFormat.Rgba32, wrap: true))
+{
+    image.DrawText($"fps {fps:0.0}", new PointF(16, 16), TextStyle.Default with { Color = Rgba32.White });
+    using ILockedFramebuffer fb = bitmap.Lock();
+    image.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);
+}
+```
+
+`wrap: true` 与否在这一版结果相同（后端都返回 false），写上只是为了以后开了真零拷贝时代码不用改。
+
+### 13.4 线程与丢帧
+
+- 读线程只做：`ffmpeg` 进程 stdout → 双缓冲（两个 `byte[]`，复用不每帧分配）→ 发布"最新帧序号"；
+  本批 `wrap: true` 是拷贝，UI 线程不持有读线程的缓冲；等开了真零拷贝再升三缓冲（§13.7）；
+- UI 线程在 `CompositionTarget.Rendering` 里取最新一帧画，**读不过来就丢**（视频叠加场景的正确策略）；
+- `WriteableBitmap` 只在 UI 线程 `Lock`，不跨线程；
+- `wrap: true` 的 `FacadeImage` 必须在缓冲被复用的**同一个作用域内** Dispose（读下一帧之前），否则读到撕裂画面。
+
+### 13.5 性能目标（要实测并写回本节）
+
+- 1080p30 / 1080p60 稳定；HUD 每帧一次中文绘制 + 两三个形状；
+- 每帧托管分配 < 1 KB（`GC.GetAllocatedBytesForCurrentThread` 自己打印出来，顺带当演示的调试信息）；
+- CPU 占用与纯 `WriteableBitmap` 拷贝（无 HUD）对比，差值就是绘制成本。
+
+### 13.6 注意事项（README 例子段落同步）
+
+| 点 | 说明 |
+|---|---|
+| ffmpeg 的像素格式必须与 `PixelFormat` 对上 | `-pix_fmt rgba` + `Rgba32`；`bgra` + `Bgra32`。对不上是静默的通道错位，最难查 |
+| 预乘 | 本批不要求外部预乘：`Rgba32` + `wrap: true` 由 `ImportPixels` 顺手转预乘，每帧多一次全帧拷贝 + 一次遍历（1080p 约 1~2 ms） |
+| stride | 1080p 时 ffmpeg 的 `rgba` 是紧凑的 `w*4`；但相机/别的源可能带 padding，所以例子必须按 `stride` 读，不能假设 |
+| `WriteableBitmap` 的像素格式 | 用 `Bgra8888` + `CopyPixelsTo(..., Bgra32)`（一次通道转换，SIMD 实现）；想省掉这次转换可以试 `Rgba8888`，但要实测 Avalonia 渲染开销 |
+| 分辨率变化 | `ffprobe` 先读尺寸；播放中途变分辨率就重建 `WriteableBitmap` 与缓冲，并 `Dispose` 旧帧 |
+| 为什么不用 `ImageFacade.SdcbSimdCodecs` | 这条链路一帧都不编解码，引它就是白白拖一个包 + 一套 codec 注册 |
+
+### 13.7 真零拷贝（本批不做，留作待办）
+
+外部缓冲"直接可用、不再复制一次"需要两件事同时成立：
+
+1. `Canvas` 的存储从 `byte[]` 改成 `Span<byte>`（`_pixels` + 池租 / 外部 / 新建三态所有权），
+   否则 `TryWrapPixels` 拿到 `IntPtr` 也画不进去。改动集中在 `Canvas` 的字段、
+   `Create`/`Wrap`/`Dispose`、`Buffer` 属性与约 20 处 `_buffer.AsSpan`；
+2. `PixelFormat` 加 `Rgba32Premultiplied`（与已有 `Bgra32Premultiplied` 对称），
+   `wrap: true` 只对预乘缓冲走 `TryWrapPixels`。ffmpeg 的 `rgba` 是直通：
+   要么调用方先用 `PixelConverter.Premultiply` 预乘一次，要么确认整帧 `A == 255`（不透明视频）。
+
+收益：1080p 每帧省掉 ~8 MB 拷贝 + 一次全帧遍历（约 1~2 ms）。等 B4 例子跑起来、
+按 §13.5 实测后再决定是否值得开。
+
+### 13.8 验收
+
+- [ ] `dotnet run --project samples/ImageFacade.AvaloniaDemo` 能播视频，HUD 中文正常、半透明矩形正确。
+- [ ] `dotnet list package` 只有 Avalonia + 核心包（证明"零编解码依赖"）。
+- [ ] 断流 / 分辨率变化 / 关闭窗口不崩（帧与缓冲都已 Dispose）。
+- [ ] 实测数据写回 13.5（fps、每帧分配、与纯拷贝的 CPU 差）。
+- [ ] README 加一小节「例子：ffmpeg 拉流 + Avalonia 显示」，只贴 13.3 那段骨架。

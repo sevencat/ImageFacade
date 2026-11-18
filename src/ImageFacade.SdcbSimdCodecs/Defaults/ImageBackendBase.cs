@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using ImageFacade.Backends;
+using ImageFacade.Rendering;
 using Sdcb.SimdCodecs.Abstractions;
 using SdcbImageFormat = Sdcb.SimdCodecs.Abstractions.ImageFormat;
 using SdcbImageMetadata = Sdcb.SimdCodecs.Abstractions.ImageMetadata;
@@ -32,6 +33,9 @@ public abstract class ImageBackendBase : IImageBackend
     private static readonly ConcurrentDictionary<ImageFormat, ImageDecoderRegistration> s_decoders = new();
     private static readonly ConcurrentDictionary<ImageFormat, EncoderEntry> s_encoders = new();
     private static readonly object s_sync = new();
+
+    /// <summary>绘制 / 像素读写的默认实现（核心光栅）；派生类可逐个覆盖。</summary>
+    private readonly RasterBackend _raster = new();
 
     private static IReadOnlySet<ImageFormat> s_decodeFormats = FrozenSet<ImageFormat>.Empty;
     private static IReadOnlySet<ImageFormat> s_encodeFormats = FrozenSet<ImageFormat>.Empty;
@@ -100,17 +104,20 @@ public abstract class ImageBackendBase : IImageBackend
 
     public virtual IReadOnlySet<ImageFormat> SupportedEncodeFormats => s_encodeFormats;
 
-    // ---- 派生类必须提供 ----
+    // ---- 绘制 / 像素：默认转发给核心光栅 ----
 
-    public abstract IFrame Create(int width, int height, Rgba32? background);
+    public virtual IFrame Create(int width, int height, Rgba32? background)
+        => _raster.Create(width, height, background);
 
-    public abstract IFrame Clone(IFrame frame);
+    public virtual IFrame Clone(IFrame frame) => _raster.Clone(frame);
 
-    public abstract void Clear(IFrame frame, Rgba32 color);
+    public virtual void Clear(IFrame frame, Rgba32 color) => _raster.Clear(frame, color);
 
-    public abstract bool TryGetPixel(IFrame frame, int x, int y, out Rgba32 color);
+    public virtual bool TryGetPixel(IFrame frame, int x, int y, out Rgba32 color)
+        => _raster.TryGetPixel(frame, x, y, out color);
 
-    public abstract bool TryCopyPixels(IFrame frame, Span<byte> destination, int destinationStride);
+    public virtual bool TryCopyPixels(IFrame frame, Span<byte> destination, int destinationStride)
+        => _raster.TryCopyPixels(frame, destination, destinationStride);
 
     /// <summary>
     /// 带 alpha 提示的导出：<paramref name="assumeOpaque"/> 为 <c>true</c> 时调用方**保证**整图 alpha 全是 255。
@@ -121,71 +128,56 @@ public abstract class ImageBackendBase : IImageBackend
     /// 提示只有 <see cref="EncodeRequest.AssumeOpaque"/> 一个来源，其他地方一律传 <c>null</c>。
     /// </remarks>
     public virtual bool TryCopyPixels(IFrame frame, Span<byte> destination, int destinationStride, bool? assumeOpaque)
-        => TryCopyPixels(frame, destination, destinationStride);
+        => _raster.TryCopyPixels(frame, destination, destinationStride, assumeOpaque);
 
-    public abstract void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride);
+    public virtual void ImportPixels(IFrame frame, ReadOnlySpan<byte> source, int sourceStride)
+        => _raster.ImportPixels(frame, source, sourceStride);
 
     // ---- 默认不支持，按需覆盖 ----
 
     /// <summary>
-    /// 默认：不表态（<see cref="IImageBackend.TryGetTransparency"/> 的默认实现返回 false，让门面自己扫像素）。
-    /// 能直接看自己帧内存的后端覆盖它，省掉门面那次导出（软后端就是 <c>Canvas.IsFullyOpaque()</c>）。
+    /// 默认转发核心光栅：直接看自己帧内存判断有没有透明，省掉门面那次导出。
+    /// 用自定义帧类型（覆盖了 <see cref="Create"/>）的派生类必须一并覆盖它。
     /// </summary>
     public virtual bool TryGetTransparency(IFrame frame, out bool hasTransparency)
-    {
-        hasTransparency = false;
-        return false;
-    }
+        => _raster.TryGetTransparency(frame, out hasTransparency);
 
     public virtual bool TryWrapPixels(IntPtr pixels, int width, int height, int stride, bool ownsMemory, out IFrame frame)
-    {
-        frame = null!;
-        return false;
-    }
+        => _raster.TryWrapPixels(pixels, width, height, stride, ownsMemory, out frame);
 
     public virtual bool TryResize(IFrame frame, in ResizeRequest request, out IFrame result)
-    {
-        result = null!;
-        return false;
-    }
+        => _raster.TryResize(frame, in request, out result);
 
-    public virtual bool TryDrawFrame(IFrame destination, IFrame source, PointF offset) => false;
+    public virtual bool TryDrawFrame(IFrame destination, IFrame source, PointF offset)
+        => _raster.TryDrawFrame(destination, source, offset);
 
-    public virtual bool TryDrawPoint(IFrame frame, in PointSpec spec) => false;
+    public virtual bool TryDrawPoint(IFrame frame, in PointSpec spec) => _raster.TryDrawPoint(frame, in spec);
 
-    public virtual bool TryDrawLine(IFrame frame, in LineSpec spec) => false;
+    public virtual bool TryDrawLine(IFrame frame, in LineSpec spec) => _raster.TryDrawLine(frame, in spec);
 
-    public virtual bool TryDrawPolyline(IFrame frame, in PolylineSpec spec) => false;
+    public virtual bool TryDrawPolyline(IFrame frame, in PolylineSpec spec) => _raster.TryDrawPolyline(frame, in spec);
 
-    public virtual bool TryDrawRectangle(IFrame frame, in StrokedRectSpec spec) => false;
+    public virtual bool TryDrawRectangle(IFrame frame, in StrokedRectSpec spec) => _raster.TryDrawRectangle(frame, in spec);
 
-    public virtual bool TryFillRectangle(IFrame frame, in FilledRectSpec spec) => false;
+    public virtual bool TryFillRectangle(IFrame frame, in FilledRectSpec spec) => _raster.TryFillRectangle(frame, in spec);
 
-    public virtual bool TryDrawEllipse(IFrame frame, in StrokedEllipseSpec spec) => false;
+    public virtual bool TryDrawEllipse(IFrame frame, in StrokedEllipseSpec spec) => _raster.TryDrawEllipse(frame, in spec);
 
-    public virtual bool TryFillEllipse(IFrame frame, in FilledEllipseSpec spec) => false;
+    public virtual bool TryFillEllipse(IFrame frame, in FilledEllipseSpec spec) => _raster.TryFillEllipse(frame, in spec);
 
-    public virtual bool TryFillPolygon(IFrame frame, in PolygonSpec spec) => false;
+    public virtual bool TryFillPolygon(IFrame frame, in PolygonSpec spec) => _raster.TryFillPolygon(frame, in spec);
 
-    public virtual bool TryDrawText(IFrame frame, in TextSpec spec) => false;
+    public virtual bool TryDrawText(IFrame frame, in TextSpec spec) => _raster.TryDrawText(frame, in spec);
 
     public virtual bool TryMeasureText(IFrame frame, in TextSpec spec, out TextMetrics metrics)
-    {
-        metrics = default;
-        return false;
-    }
+        => _raster.TryMeasureText(frame, in spec, out metrics);
 
-    /// <summary>
-    /// 切片版：默认把切片复制成 string 后转调上面那个重载，所以只重写了 string 版的派生类行为不变。
-    /// </summary>
+    /// <summary>切片版：直接转发，不再 <c>new string(...)</c>。</summary>
     public virtual bool TryMeasureText(IFrame frame, ReadOnlySpan<char> text, in TextStyle style, out TextMetrics metrics)
-        => TryMeasureText(frame, new TextSpec(new string(text), PointF.Empty, style), out metrics);
+        => _raster.TryMeasureText(frame, text, in style, out metrics);
 
     public virtual bool TryAcquirePixels(IFrame frame, out PixelLease lease)
-    {
-        lease = default;
-        return false;
-    }
+        => _raster.TryAcquirePixels(frame, out lease);
 
     // ---- 编解码 ----
 
@@ -360,9 +352,7 @@ public abstract class ImageBackendBase : IImageBackend
         _ => ImageFormat.Unknown,
     };
 
-    public virtual void Dispose()
-    {
-    }
+    public virtual void Dispose() => _raster.Dispose();
 
     private readonly record struct EncoderEntry(
         ImageEncoderRegistration Registration,

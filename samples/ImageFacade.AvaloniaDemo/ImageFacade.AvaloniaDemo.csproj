@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ImageFacade.AvaloniaDemo</AssemblyName>
+    <RootNamespace>ImageFacade.AvaloniaDemo</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <!-- SimdSkia 走托管宿主与 CPU 光栅，不需要任何原生资产 -->
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 只引核心包：这条链路一帧都不编解码 -->
+    <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 注意：不引 Avalonia.Desktop —— 它会把原版 Skia 后端拉回来，与 SimdSkia 互斥 -->
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="SimdSkia.Avalonia.Desktop" />
+    <PackageReference Include="FFmpeg.AutoGen" />
+  </ItemGroup>
+
+</Project>
