@@ -33,8 +33,8 @@ internal static class RectangleFill
         int lastRow = (int)MathF.Ceiling(bottom) - 1;
         int span = lastColumn - firstColumn + 1;
 
-        byte[] full = ArrayPool<byte>.Shared.Rent(span);
-        byte[] partial = ArrayPool<byte>.Shared.Rent(span);
+        byte[] full = PixelBufferPool.Shared.Rent(span);
+        byte[] partial = PixelBufferPool.Shared.Rent(span);
 
         try
         {
@@ -84,8 +84,8 @@ internal static class RectangleFill
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(full);
-            ArrayPool<byte>.Shared.Return(partial);
+            PixelBufferPool.Shared.Return(full);
+            PixelBufferPool.Shared.Return(partial);
         }
     }
 

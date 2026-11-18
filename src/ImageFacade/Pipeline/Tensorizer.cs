@@ -43,7 +43,7 @@ public static class Tensorizer
 
         int stride = options.Width * 4;
         int byteCount = checked(stride * options.Height);
-        byte[] rented = ArrayPool<byte>.Shared.Rent(byteCount);
+        byte[] rented = PixelBufferPool.Shared.Rent(byteCount);
         try
         {
             Span<byte> canonical = rented.AsSpan(0, byteCount);
@@ -52,7 +52,7 @@ public static class Tensorizer
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            PixelBufferPool.Shared.Return(rented);
         }
     }
 

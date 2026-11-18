@@ -300,7 +300,7 @@ internal sealed partial class Canvas : IDisposable
     public void FlipVertical()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        byte[] tmp = ArrayPool<byte>.Shared.Rent(Width * BytesPerPixel);
+        byte[] tmp = PixelBufferPool.Shared.Rent(Width * BytesPerPixel);
         try
         {
             for (int top = 0, bottom = Height - 1; top < bottom; top++, bottom--)
@@ -315,7 +315,7 @@ internal sealed partial class Canvas : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(tmp);
+            PixelBufferPool.Shared.Return(tmp);
         }
     }
 

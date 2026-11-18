@@ -23,12 +23,26 @@ internal sealed partial class MainWindow : Window
     private double _fps;
     private TimeSpan _lastPosition = TimeSpan.MinValue;
 
-    // 临时诊断：--mem 时每 2 秒打一次内存明细
+    // 临时诊断：--mem 每 2 秒往 stderr 打一行内存明细
     private readonly bool _traceMemory = Environment.GetCommandLineArgs().Contains("--mem");
 
-    public MainWindow(string? initialPath = null)
+    // --shot <png> / --save-frame <png>：攒够若干帧后自动执行并退出，窗口挪到屏幕外，不抢前台
+    private readonly string? _shotPath;
+    private readonly string? _saveFramePath;
+    private int _renderedFrames;
+
+    public MainWindow(string? initialPath = null, string? shotPath = null, string? saveFramePath = null)
     {
+        _shotPath = shotPath;
+        _saveFramePath = saveFramePath;
         InitializeComponent();
+
+        if (shotPath is not null || saveFramePath is not null)
+        {
+            ShowInTaskbar = false;
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Position = new PixelPoint(-20000, -20000);
+        }
 
         if (FfmpegRuntime.TryInitialize(out string info))
         {
@@ -50,8 +64,7 @@ internal sealed partial class MainWindow : Window
 
         if (_traceMemory)
         {
-            var memoryTimer = new DispatcherTimer(TimeSpan.FromSeconds(2), DispatcherPriority.Background, (_, _) => DumpMemory());
-            memoryTimer.Start();
+            new DispatcherTimer(TimeSpan.FromSeconds(2), DispatcherPriority.Background, (_, _) => DumpMemory()).Start();
         }
     }
 
@@ -61,20 +74,13 @@ internal sealed partial class MainWindow : Window
         double mb = 1048576d;
         GCMemoryInfo info = GC.GetGCMemoryInfo();
         ReadOnlySpan<GCGenerationInfo> gens = info.GenerationInfo;
-        string gen = string.Join(
-            " ",
-            $"g0={gens[0].SizeAfterBytes / mb:0.0}",
-            $"g1={gens[1].SizeAfterBytes / mb:0.0}",
-            $"g2={gens[2].SizeAfterBytes / mb:0.0}",
-            $"loh={gens[3].SizeAfterBytes / mb:0.0}");
         Console.Error.WriteLine(
-            $"[mem] heap={info.HeapSizeBytes / mb:0.0} {gen} " +
+            $"[mem] {DateTime.Now:HH:mm:ss} heap={info.HeapSizeBytes / mb:0.0} " +
+            $"g0={gens[0].SizeAfterBytes / mb:0.0} g1={gens[1].SizeAfterBytes / mb:0.0} " +
+            $"g2={gens[2].SizeAfterBytes / mb:0.0} loh={gens[3].SizeAfterBytes / mb:0.0} " +
             $"ws={self.WorkingSet64 / mb:0.0} priv={self.PrivateMemorySize64 / mb:0.0} " +
-            $"pool={(_player?.BufferedBytes ?? 0) / mb:0.0} drop={_player?.DroppedFrames} " +
-            $"bmp={_bitmapWidth * _bitmapHeight * 4d / mb:0.0} fps={_fps:0.0} " +
             $"alloc={GC.GetTotalAllocatedBytes() / mb:0} " +
-            $"gc={GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} " +
-            $"codec=[{_player?.Description}]");
+            $"gc={GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} fps={_fps:0.0}");
     }
 
     protected override void OnClosed(EventArgs e)
@@ -89,6 +95,63 @@ internal sealed partial class MainWindow : Window
     private async void OnOpenClick(object? sender, RoutedEventArgs e) => await OpenAsync();
 
     private void OnPauseClick(object? sender, RoutedEventArgs e) => TogglePause();
+
+    private async void OnSaveClick(object? sender, RoutedEventArgs e) => await SaveFrameAsync();
+
+    private async Task SaveFrameAsync()
+    {
+        IStorageFile? file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "保存当前帧",
+            SuggestedFileName = $"frame_{DateTime.Now:HHmmss}.png",
+            DefaultExtension = "png",
+            FileTypeChoices =
+            [
+                new FilePickerFileType("PNG") { Patterns = ["*.png"] },
+            ],
+        });
+
+        if (file is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // 走 Sdcb 软后端编码；想换成"零编解码依赖"的做法就改调 SaveFrameWithAvalonia
+            _composer.SavePng(file.Path.LocalPath);
+            StatusText.Text = $"已保存：{file.Path.LocalPath}";
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = $"保存失败：{ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// 备选方案，当前<b>没有</b>调用：如果不想引入 <c>ImageFacade.SdcbSimdCodecs</c> 和
+    /// <c>Sdcb.SimdCodecs.Png</c>，可以直接用 Avalonia 主包自带的 PNG 编码器把位图写盘——
+    /// 项目里一个编解码包都不用引（SimdSkia 后端已实现 <c>Bitmap.Save(Stream)</c>）。
+    /// </summary>
+    /// <remarks>
+    /// 两条路径的差别：<see cref="FrameComposer.SavePng"/> 存的是 <see cref="ImageFacade.FacadeImage"/>
+    /// 的像素，能带 <see cref="ImageFacade.SaveOptions"/>（压缩级别 / 质量 / 元数据）和
+    /// 后续换成 JPEG、WebP 等格式；这里存的是已经交给 Avalonia 的 <see cref="WriteableBitmap"/>，
+    /// 编码完全由渲染后端决定，拿不到那些选项。
+    /// </remarks>
+    private void SaveFrameWithAvalonia(string path)
+    {
+        if (_bitmap is not { } bitmap)
+        {
+            return;
+        }
+
+        using FileStream stream = File.Create(path);
+        // 带 quality 的新重载 SimdSkia 还没实现，只能走旧签名
+#pragma warning disable CS0618
+        bitmap.Save(stream);
+#pragma warning restore CS0618
+    }
 
     private async Task OpenAsync()
     {
@@ -132,6 +195,7 @@ internal sealed partial class MainWindow : Window
 
         PauseButton.IsEnabled = true;
         PauseButton.Content = "暂停";
+        SaveButton.IsEnabled = false;
         _lastPosition = TimeSpan.MinValue;
         StatusText.Text = $"解码中：{Path.GetFileName(path)}";
     }
@@ -169,6 +233,7 @@ internal sealed partial class MainWindow : Window
             player.Dispose();
             _player = null;
             PauseButton.IsEnabled = false;
+            SaveButton.IsEnabled = false;
             return;
         }
 
@@ -179,12 +244,10 @@ internal sealed partial class MainWindow : Window
 
         try
         {
-            long before = GC.GetAllocatedBytesForCurrentThread();
-
             EnsureBitmap(width, height);
             using ILockedFramebuffer framebuffer = _bitmap!.Lock();
 
-            // 直通 RGBA32 入 → 画 HUD → 直通 Bgra32 写进 WriteableBitmap
+            // 直通 RGBA32 入 → 画 HUD → 直通 RGBA32 写进 WriteableBitmap（位图本身就是 Rgba8888）
             _composer.Compose(pixels, width, height, framebuffer.Address, framebuffer.RowBytes, position, _fps);
 
             VideoView.InvalidateVisual();
@@ -202,12 +265,61 @@ internal sealed partial class MainWindow : Window
                 _fpsClock.Restart();
             }
 
-            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-            StatusText.Text = $"{width}×{height}  ·  {position:mm\\:ss\\.fff}  ·  每帧分配 {allocated} B";
+            StatusText.Text = $"{width}×{height}  ·  {position:mm\\:ss\\.fff}";
+            SaveButton.IsEnabled = true;
+
+            if ((_shotPath is not null || _saveFramePath is not null) && ++_renderedFrames == 20)
+            {
+                Dispatcher.UIThread.Post(AutoCapture, DispatcherPriority.Background);
+            }
         }
         finally
         {
             player.ReturnFrame(pixels);
+        }
+    }
+
+    /// <summary>命令行自动化：存帧 / 截图后退出。</summary>
+    private void AutoCapture()
+    {
+        if (_saveFramePath is { } framePath)
+        {
+            try
+            {
+                _composer.SavePng(framePath);
+                Console.Error.WriteLine($"[save-frame] {framePath}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[save-frame] 失败：{ex}");
+            }
+        }
+
+        if (_shotPath is { } shotPath)
+        {
+            CaptureWindow(shotPath);
+        }
+
+        Close();
+    }
+
+    /// <summary>把当前窗口内容渲染到 PNG；不依赖窗口在屏幕上可见。</summary>
+    private void CaptureWindow(string path)
+    {
+        try
+        {
+            var size = new PixelSize((int)Math.Ceiling(Bounds.Width), (int)Math.Ceiling(Bounds.Height));
+            using var target = new RenderTargetBitmap(size, new Vector(96, 96));
+            target.Render(this);
+            // SimdSkia 还没实现新重载（传 null options 会抛 NotSupportedException），只能走旧重载
+#pragma warning disable CS0618
+            target.Save(path);
+#pragma warning restore CS0618
+            Console.Error.WriteLine($"[shot] {path} {size.Width}x{size.Height}");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[shot] 失败：{ex}");
         }
     }
 
@@ -222,7 +334,7 @@ internal sealed partial class MainWindow : Window
         _bitmap = new WriteableBitmap(
             new PixelSize(width, height),
             new Vector(96, 96),
-            Avalonia.Platform.PixelFormat.Bgra8888,
+            Avalonia.Platform.PixelFormat.Rgba8888,
             AlphaFormat.Opaque);
         _bitmapWidth = width;
         _bitmapHeight = height;

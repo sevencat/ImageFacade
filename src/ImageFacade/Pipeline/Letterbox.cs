@@ -87,11 +87,11 @@ public static class Letterbox
 
         int scaledStride = plan.ScaledWidth * 4;
         int scaledLength = checked(scaledStride * plan.ScaledHeight);
-        byte[] scaledBuffer = ArrayPool<byte>.Shared.Rent(scaledLength);
+        byte[] scaledBuffer = PixelBufferPool.Shared.Rent(scaledLength);
 
         int outputStride = options.Width * 4;
         int outputLength = checked(outputStride * options.Height);
-        byte[] outputBuffer = ArrayPool<byte>.Shared.Rent(outputLength);
+        byte[] outputBuffer = PixelBufferPool.Shared.Rent(outputLength);
 
         try
         {
@@ -113,8 +113,8 @@ public static class Letterbox
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(scaledBuffer);
-            ArrayPool<byte>.Shared.Return(outputBuffer);
+            PixelBufferPool.Shared.Return(scaledBuffer);
+            PixelBufferPool.Shared.Return(outputBuffer);
         }
     }
 

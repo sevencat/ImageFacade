@@ -78,8 +78,8 @@ public sealed class FacadeImage : IDisposable
         }
 
         // 合成需要的两块缓冲都可能到 MB 级（1080p 缩放约 8 MB），走池避免每帧进 LOH
-        byte[] scaled = ArrayPool<byte>.Shared.Rent(checked(plan.ScaledWidth * 4 * plan.ScaledHeight));
-        byte[] output = ArrayPool<byte>.Shared.Rent(checked(plan.OutputWidth * 4 * plan.OutputHeight));
+        byte[] scaled = PixelBufferPool.Shared.Rent(checked(plan.ScaledWidth * 4 * plan.ScaledHeight));
+        byte[] output = PixelBufferPool.Shared.Rent(checked(plan.OutputWidth * 4 * plan.OutputHeight));
 
         try
         {
@@ -146,8 +146,8 @@ public sealed class FacadeImage : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(scaled);
-            ArrayPool<byte>.Shared.Return(output);
+            PixelBufferPool.Shared.Return(scaled);
+            PixelBufferPool.Shared.Return(output);
         }
     }
 
@@ -595,7 +595,7 @@ public sealed class FacadeImage : IDisposable
         }
 
         int canonicalStride = Width * 4;
-        byte[] rented = ArrayPool<byte>.Shared.Rent(checked(canonicalStride * Height));
+        byte[] rented = PixelBufferPool.Shared.Rent(checked(canonicalStride * Height));
         try
         {
             Span<byte> canonical = rented.AsSpan(0, canonicalStride * Height);
@@ -608,7 +608,7 @@ public sealed class FacadeImage : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            PixelBufferPool.Shared.Return(rented);
         }
     }
 
@@ -840,7 +840,7 @@ public sealed class FacadeImage : IDisposable
 
         int stride = Width * 4;
         int length = checked(stride * Height);
-        byte[] rented = ArrayPool<byte>.Shared.Rent(length);
+        byte[] rented = PixelBufferPool.Shared.Rent(length);
         IFrame? frame = null;
         try
         {
@@ -866,7 +866,7 @@ public sealed class FacadeImage : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            PixelBufferPool.Shared.Return(rented);
         }
     }
 

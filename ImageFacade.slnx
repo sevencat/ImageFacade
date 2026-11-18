@@ -19,6 +19,5 @@
   <Folder Name="/samples/">
     <Project Path="samples/ImageFacade.Samples/ImageFacade.Samples.csproj" />
     <Project Path="samples/ImageFacade.AvaloniaDemo/ImageFacade.AvaloniaDemo.csproj" />
-    <Project Path="samples/ImageFacade.AvaloniaNativeDemo/ImageFacade.AvaloniaNativeDemo.csproj" />
   </Folder>
 </Solution>

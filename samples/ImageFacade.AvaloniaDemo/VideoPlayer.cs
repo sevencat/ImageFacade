@@ -24,7 +24,6 @@ internal sealed unsafe class VideoPlayer : IDisposable
     private int _height;
     private TimeSpan _position;
     private string? _error;
-    private long _dropped;
 
     public string? Error
     {
@@ -47,7 +46,6 @@ internal sealed unsafe class VideoPlayer : IDisposable
             _free.Clear();
             _pending = null;
             _frameOut = false;
-            _dropped = 0;
             _error = null;
             _position = TimeSpan.Zero;
             _width = 0;
@@ -89,39 +87,6 @@ internal sealed unsafe class VideoPlayer : IDisposable
             height = _height;
             position = _position;
             return true;
-        }
-    }
-
-    /// <summary>当前帧池 + 待取帧占用的托管字节数（诊断用）。</summary>
-    public int BufferedBytes
-    {
-        get
-        {
-            lock (_gate)
-            {
-                int total = _pending?.Length ?? 0;
-                foreach (byte[] buffer in _free)
-                {
-                    total += buffer.Length;
-                }
-
-                return total;
-            }
-        }
-    }
-
-    /// <summary>解码器信息（诊断用）：编码名、分辨率、像素格式、线程数、码率。</summary>
-    public string Description { get; private set; } = "";
-
-    /// <summary>丢帧数（诊断用）：池里 4 块全被占用时，本帧不解码。</summary>
-    public long DroppedFrames
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _dropped;
-            }
         }
     }
 
@@ -207,16 +172,6 @@ internal sealed unsafe class VideoPlayer : IDisposable
                 Fail("打开解码器失败", ret);
                 return;
             }
-
-            Description = string.Join(
-                " ",
-                System.Runtime.InteropServices.Marshal.PtrToStringAnsi((IntPtr)decoder->name) ?? "?",
-                $"{codec->width}x{codec->height}",
-                $"pix={codec->pix_fmt}",
-                $"profile={codec->profile}",
-                $"level={codec->level}",
-                $"threads={codec->thread_count}",
-                $"br={codec->bit_rate}");
 
             packet = ffmpeg.av_packet_alloc();
             frame = ffmpeg.av_frame_alloc();
@@ -331,7 +286,6 @@ internal sealed unsafe class VideoPlayer : IDisposable
             if (target is null)
             {
                 // 4 块全在占用中（待取帧 / UI 正在渲染），这一帧不解码，直接丢掉
-                Interlocked.Increment(ref _dropped);
                 return;
             }
 

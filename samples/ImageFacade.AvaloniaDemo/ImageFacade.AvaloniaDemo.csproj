@@ -13,6 +13,8 @@
   <ItemGroup>
     <!-- 只引核心包：这条链路一帧都不编解码 -->
     <ProjectReference Include="..\..\src\ImageFacade\ImageFacade.csproj" />
+    <!-- "保存图片"按钮走 Sdcb 软后端编码，逐帧渲染仍然只用上面的核心光栅 -->
+    <ProjectReference Include="..\..\src\ImageFacade.SdcbSimdCodecs\ImageFacade.SdcbSimdCodecs.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -21,6 +23,8 @@
     <PackageReference Include="Avalonia.Themes.Fluent" />
     <PackageReference Include="SimdSkia.Avalonia.Desktop" />
     <PackageReference Include="FFmpeg.AutoGen" />
+    <!-- 软后端不自带格式，PNG 由使用方注册 -->
+    <PackageReference Include="Sdcb.SimdCodecs.Png" />
   </ItemGroup>
 
 </Project>

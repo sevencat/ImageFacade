@@ -199,7 +199,7 @@ public abstract class ImageBackendBase : IImageBackend
         int width = info.Width;
         int height = info.Height;
         int stride = width * 4;
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(checked(stride * height));
+        byte[] buffer = PixelBufferPool.Shared.Rent(checked(stride * height));
         try
         {
             Span<byte> pixels = buffer.AsSpan(0, stride * height);
@@ -228,7 +228,7 @@ public abstract class ImageBackendBase : IImageBackend
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            PixelBufferPool.Shared.Return(buffer);
         }
     }
 
@@ -244,7 +244,7 @@ public abstract class ImageBackendBase : IImageBackend
         int width = frame.Width;
         int height = frame.Height;
         int stride = width * 4;
-        byte[] pixels = ArrayPool<byte>.Shared.Rent(checked(stride * height));
+        byte[] pixels = PixelBufferPool.Shared.Rent(checked(stride * height));
         try
         {
             Span<byte> straight = pixels.AsSpan(0, stride * height);
@@ -267,7 +267,7 @@ public abstract class ImageBackendBase : IImageBackend
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(pixels);
+            PixelBufferPool.Shared.Return(pixels);
         }
     }
 

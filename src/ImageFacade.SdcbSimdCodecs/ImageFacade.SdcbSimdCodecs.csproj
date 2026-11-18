@@ -3,7 +3,7 @@
   <PropertyGroup>
     <!-- 0.3.0 起与核心及其它后端统一基线（此前是独立的 0.1.x 版本线）。
          对齐之后走全量 `dotnet pack ImageFacade.slnx` 即可，不再需要单独指定 VersionPrefix。 -->
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <!-- Sdcb.SimdCodecs 2.0.0 只提供 net10.0 资产，所以软后端（以及依赖它的示例）不保留 net8.0 目标。 -->
     <TargetFrameworks>net10.0</TargetFrameworks>
     <AssemblyName>ImageFacade.SdcbSimdCodecs</AssemblyName>

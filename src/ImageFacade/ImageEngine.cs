@@ -101,7 +101,7 @@ public sealed class ImageEngine : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            PixelBufferPool.Shared.Return(buffer);
         }
     }
 
@@ -234,7 +234,7 @@ public sealed class ImageEngine : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            PixelBufferPool.Shared.Return(buffer);
         }
     }
 
@@ -384,7 +384,7 @@ public sealed class ImageEngine : IDisposable
         }
 
         int canonicalStride = checked(width * 4);
-        byte[] rented = ArrayPool<byte>.Shared.Rent(checked(canonicalStride * height));
+        byte[] rented = PixelBufferPool.Shared.Rent(checked(canonicalStride * height));
         try
         {
             Span<byte> canonical = rented.AsSpan(0, canonicalStride * height);
@@ -393,7 +393,7 @@ public sealed class ImageEngine : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            PixelBufferPool.Shared.Return(rented);
         }
     }
 
@@ -508,7 +508,7 @@ public sealed class ImageEngine : IDisposable
         }
 
         size = Math.Min(size, ReadBufferCap(maxEncodedBytes));
-        return ArrayPool<byte>.Shared.Rent((int)Math.Clamp(size, 1, Array.MaxLength));
+        return PixelBufferPool.Shared.Rent((int)Math.Clamp(size, 1, Array.MaxLength));
     }
 
     /// <summary>按块读入，累计超过 <paramref name="maxEncodedBytes"/> 立即抛异常（此时已读的字节数如实上报）。</summary>
@@ -544,9 +544,9 @@ public sealed class ImageEngine : IDisposable
                 (long)total + 1);
         }
 
-        byte[] bigger = ArrayPool<byte>.Shared.Rent((int)grown);
+        byte[] bigger = PixelBufferPool.Shared.Rent((int)grown);
         Buffer.BlockCopy(buffer, 0, bigger, 0, total);
-        ArrayPool<byte>.Shared.Return(buffer);
+        PixelBufferPool.Shared.Return(buffer);
         return bigger;
     }
 

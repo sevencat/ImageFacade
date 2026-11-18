@@ -18,7 +18,7 @@ internal sealed class CoverageBuffer : IDisposable
         Width = width;
         Height = height;
         Stride = width;
-        _data = ArrayPool<byte>.Shared.Rent(width * height);
+        _data = PixelBufferPool.Shared.Rent(width * height);
         _data.AsSpan(0, width * height).Clear();
     }
 
@@ -41,7 +41,7 @@ internal sealed class CoverageBuffer : IDisposable
         _data = Array.Empty<byte>();
         if (data.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(data);
+            PixelBufferPool.Shared.Return(data);
         }
     }
 }

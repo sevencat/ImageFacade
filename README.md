@@ -58,19 +58,19 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 
 ## 安装
 
-七个包都已发布到 [nuget.org](https://www.nuget.org/packages/Sevencat.ImageFacade)，当前版本 `0.3.0`。
+七个包都已发布到 [nuget.org](https://www.nuget.org/packages/Sevencat.ImageFacade)，当前版本 `0.4.0`。
 
 ```xml
 <!-- 核心包永远要引，再按需加一个后端 -->
-<PackageReference Include="Sevencat.ImageFacade" Version="0.3.0" />
-<PackageReference Include="Sevencat.ImageFacade.SkiaSharp" Version="0.3.0" />
+<PackageReference Include="Sevencat.ImageFacade" Version="0.4.0" />
+<PackageReference Include="Sevencat.ImageFacade.SkiaSharp" Version="0.4.0" />
 ```
 
 后端包已带上对应三方库的依赖，不需要重复声明 `SkiaSharp` / `OpenCvSharp4` / `SixLabors.ImageSharp`。
 
 ### 版本与兼容
 
-**每个包独立发版**，不强制"七个包同进同退"（`0.3.0` 是当前七个包统一的基线，此前的软后端曾单独走 `0.1.x`）：
+**每个包独立发版**，不强制"七个包同进同退"（`0.4.0` 是当前七个包统一的基线，此前的软后端曾单独走 `0.1.x`）：
 
 | 包 | 版本线 |
 |---|---|
@@ -83,7 +83,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 2. **核心前向兼容时，后端不用重发**：核心只做"加 API / 修 bug"的兼容改动时，把它升到更高的 `X.Y.Z+n`，现有后端包照常工作；只有核心做了不兼容改动（升主版本）才需要后端重新发版对齐。
 3. **只升后端也安全**：后端只用到核心的旧 API，升级某个后端不会连累核心。
 
-各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.3.0"` 是当前统一基线的取值。
+各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.4.0"` 是当前统一基线的取值。
 
 | 包 | 后端类 | 三方库 | 说明 |
 |---|---|---|---|
@@ -664,7 +664,7 @@ dotnet pack  ImageFacade.slnx -c Release -o artifacts/packages
 
 ## 示例：Avalonia 播放器（SimdSkia + FFmpeg.AutoGen）
 
-`samples/ImageFacade.AvaloniaDemo` 是一条端到端链路：FFmpeg.AutoGen 解出裸帧 → ImageFacade 在帧上叠时间和 fps → 写进 Avalonia 的 `WriteableBitmap`；窗口用 `SimdSkia.Avalonia.Desktop` 渲染，全程不引 SkiaSharp，也不引任何编解码包。
+`samples/ImageFacade.AvaloniaDemo` 是一条端到端链路：FFmpeg.AutoGen 解出裸帧 → ImageFacade 在帧上叠时间和 fps → 写进 Avalonia 的 `WriteableBitmap`；窗口用 `SimdSkia.Avalonia.Desktop` 渲染，全程不引 SkiaSharp。播放本身一帧都不编解码；只有「保存图片」按钮额外引了 `ImageFacade.SdcbSimdCodecs` + `Sdcb.SimdCodecs.Png`（不想引的话见 [保存一帧](#保存一帧两条路选一条) 的 B 方案）。
 
 ```powershell
 # 1. 原生库：FFmpeg.AutoGen 只是绑定，DLL 由运行环境提供。
@@ -684,19 +684,93 @@ dotnet run --project samples/ImageFacade.AvaloniaDemo -- --decode-check D:\clips
 
 - 界面在 `MainWindow.axaml`，逻辑在 `MainWindow.axaml.cs`。
 - 后台解码线程按 PTS 节流产出直通 RGBA32 帧，UI 线程用 `DispatcherTimer` 取最新帧写入 `WriteableBitmap`；分辨率变化时重建位图。
-- HUD 在 `FrameComposer` 里用核心光栅完成：画布按尺寸建一次，之后每帧 `ImportPixels` → `FillRectangle` / `DrawText` → `CopyPixelsTo(Bgra32)`。
-- 窗口底部显示当前尺寸、时间与单帧分配字节数。
+- HUD 在 `FrameComposer` 里用核心光栅完成：画布按尺寸建一次，之后每帧 `ImportPixels` → `FillRectangle` / `DrawText` → `CopyPixelsTo(framebuffer.Address, framebuffer.RowBytes, Rgba32)`，直接写进 `WriteableBitmap` 的像素内存。
+- 窗口底部显示当前尺寸与播放时间。
 - 根容器必须给一个**不透明的 `Background`**。这跟渲染后端无关：Avalonia 12.1.5 在「窗口背景不透明 + 根 Panel 的 `Background` 为 `null` 或 `Transparent`」时，`Button` 这类带模板的控件会整块不绘制（官方 Skia 后端同样复现），`TextBlock`、`Border` 不受影响。给个不透明色即可，`Transparent` 不管用。
+
+### 一帧的旅程：FFmpeg → ImageFacade → SimdSkia
+
+整条链路只有**一次像素格式转换**（`sws_scale`）和**一次跨线程交接**（换引用），中间不经过任何 `Bitmap` / `SKBitmap` / `byte[]` 的额外拷贝：
+
+```text
+FFmpeg 解码线程（VideoPlayer.Run）              UI 线程（DispatcherTimer，15 ms）
+─────────────────────────────────              ──────────────────────────────
+av_read_frame → packet
+  → avcodec_send_packet / receive_frame
+  → AVFrame（yuv420p / nv12 …）
+  → sws_scale → 直通 RGBA32
+  → 帧池 byte[]（4 块，首帧按分辨率建满）
+        │
+        │  _pending 换引用（不拷贝）
+        └────────── TryTakeFrame ──────────────►  WriteableBitmap.Lock()
+                                                   → ILockedFramebuffer.Address
+                                                   → ImportPixels（直通 → 内部预乘）
+                                                   → FillRectangle + DrawText（HUD）
+                                                   → CopyPixelsTo(Address)（写回位图）
+                                                   → InvalidateVisual()
+                        ◄────── ReturnFrame ──────  （缓冲还给池）
+```
+
+| 步骤 | 谁在做 | 每帧的代价 |
+|---|---|---|
+| 解码 + `sws_scale` 成 RGBA | FFmpeg 原生库 | 一次整帧转换，写进池里的缓冲 |
+| 交接 `byte[]` | `VideoPlayer` | 换引用，0 拷贝 |
+| `Lock()` 拿位图内存 | Avalonia / SimdSkia | 0 拷贝，直接给出像素地址 |
+| `ImportPixels` | ImageFacade 光栅 | 一次直通 → 预乘转换（同一块内存） |
+| HUD（矩形 + 两行字） | ImageFacade 光栅 | 微秒级 |
+| `CopyPixelsTo(Address)` | ImageFacade 光栅 | 一次预乘 → 直通写回位图 |
+| 上屏 | SimdSkia | 位图提交为纹理（后端内部） |
+
+两个关键点：
+
+1. **缓冲归谁、什么时候建**：帧池 4 块在首帧一次建满，UI 来不及取时旧帧直接丢弃（`RentBuffer` 返回 `null`），池不会增长，也不会堆积延迟。
+2. **画布与位图都只建一次**：分辨率变化才重建。`ImportPixels` / `CopyPixelsTo` 都在覆盖同一块内存，所以每帧没有 `new`。
+
+### 保存一帧：两条路，选一条
+
+「保存图片」按钮取的是**当前这一帧 `FacadeImage`**（视频画面 + HUD 都在上面），有两种存法：
+
+**A. Sdcb 软后端（demo 里用的这条）**——渲染和保存共用一个 `SoftwareBackend` 引擎：
+
+```csharp
+// 启动时注册一次 PNG
+ImageBackendBase.RegisterCodec(ImageFormat.Png, PngImageDecoder.Registration, PngImageEncoder.Registration);
+
+using var engine = new ImageEngine(new SoftwareBackend());
+FacadeImage canvas = engine.Create(width, height, Rgba32.Black);
+// …每帧 ImportPixels + 画 HUD…
+canvas.SavePng("frame.png");       // 直接编码，不需要中转缓冲
+```
+
+`SoftwareBackend` 的绘制 / 像素读写由 `ImageBackendBase` 直接转给核心光栅，和 `new ImageEngine()` 是同一份实现；编解码则挂在这个后端上。所以**画布自己就能存**，不必"核心光栅画、另一个引擎存"那样搬一次像素。编码时内部只从 `PixelBufferPool`（4 MiB 上限）租一次缓冲，960×720（2.7 MB）能命中复用。
+
+**B. Avalonia 主包自带的编码器**——一个编解码包都不引：`WriteableBitmap` 已经是画好 HUD 的那一帧，直接交给 Avalonia 写盘即可（`MainWindow.SaveFrameWithAvalonia`，demo 里保留作示例、默认不调用）。
+
+| | A. Sdcb 软后端 | B. Avalonia `Bitmap.Save` |
+|---|---|---|
+| 额外依赖 | `ImageFacade.SdcbSimdCodecs` + `Sdcb.SimdCodecs.Png` | 无 |
+| 数据来源 | `FacadeImage` 像素 | `WriteableBitmap` 像素 |
+| 可控项 | `SaveOptions`（压缩级别 / 元数据），可换 JPEG / WebP / BMP… | 只有后端默认值 |
+| 不注册 codec 时 | `Load` / `Save` 抛 `FeatureNotSupportedException` | 照常可用 |
+
+两种存法写出来的都是 960×720、含 HUD 的 PNG（同一个画面分别约 420 KB / 400 KB，压缩实现不同略有差异）。
+
+命令行也能直接走这条路径（窗口摆到屏幕外，不抢前台）：
+
+```powershell
+dotnet run --project samples/ImageFacade.AvaloniaDemo -- --open D:\clips\demo.mp4 --save-frame D:\out\frame.png
+# --shot D:\out\ui.png 则连窗口一起截（RenderTargetBitmap），用于验证界面
+```
 
 ### 原生后端对照：`samples/ImageFacade.AvaloniaNativeDemo`
 
 同一份解码与 HUD 合成代码（直接链接 `VideoPlayer.cs` / `FrameComposer.cs`，没有复制），只把 `UseSimdSkiaDesktop()` 换成官方的 `UsePlatformDetect()`，用来判断某个现象到底出在 ImageFacade 还是出在渲染后端。
 
 ```powershell
-dotnet run --project samples/ImageFacade.AvaloniaNativeDemo -- --open D:\clips\demo.mp4 --mem
+dotnet run --project samples/ImageFacade.AvaloniaNativeDemo -- --open D:\clips\demo.mp4
 ```
 
-`--mem` 每 2 秒往 stderr 打一行，字段与 SimdSkia 版完全一致，可以直接并排看。
+### 内存：链路侧零分配，曲线是窄幅锯齿
 
 **播放过程中不会反复分配大内存。** 整条链路只有三处持有像素，每处都只建一次：
 
@@ -706,7 +780,24 @@ dotnet run --project samples/ImageFacade.AvaloniaNativeDemo -- --open D:\clips\d
 | ImageFacade 画布 | 分辨率变化时 `Create` | `ImportPixels` 覆盖同一块内存，HUD 画在上面 |
 | `WriteableBitmap` | 分辨率变化时 `new` | `Lock()` 后由 `CopyPixelsTo` 直接写进去 |
 
-实测 960×720、60 秒：托管堆 12.5 MB 恒定，LOH 10.5 MB（就是那 4 块帧池），分配速率 0.2 MB/s，GC 1 次。同一个视频在 SimdSkia 后端上是 52~95 MB 来回抖、约 40 MB/s、GC 20 多次；差别全在绘制路径，解码和合成一行没改。
+这三处就是每帧会走过的全部路径，全都是复用。960×720、约 30 fps 连跑 35 秒（`--mem` 每 2 秒采一行）：
+
+| 指标 | 采样区间 |
+|---|---|
+| fps | 29.4 ~ 30.7 |
+| 托管堆 | 69.7 ~ 89.9 MB |
+| LOH | 56.1 ~ 69.3 MB |
+| 工作集 | 247 ~ 261 MB |
+
+曲线是**窄幅锯齿**而不是台阶：GC 一过就落回基线，35 秒里没有任何单向爬升，也没有"越播越慢"。把 `VideoView.InvalidateVisual()` 临时注释掉再跑，分配速率掉到 0.9 MB/s、LOH 恒定 44.2 MB——说明**解码、合成、写位图这一侧已经零分配**，剩下的波动只来自 SimdSkia 把位图提交成纹理（约 2.4 MB/帧）。
+
+SimdSkia 在这条链路里的好处很直接：
+
+- **没有原生对象要管**：不需要 `SKBitmap` / `SKSurface` / `SKImage`，也不需要 `Switch` 到 UI 线程做 `SKCanvas.DrawBitmap`；一整帧的托管表示就是那张 `WriteableBitmap`，不再有第二份"显示用"的缓冲。
+- **没有原生 DLL**：不引 `SkiaSharp` / `SkiaSharp.NativeAssets.*`，纯托管，`dotnet publish` 出来就是全部，部署与 AOT 都省事。
+- **波动可预期**：链路上的分配是 0，渲染侧的量级固定，所以内存曲线稳定在几十 MB 的窄带里，不随时长增长。
+
+如果连每帧那次纹理提交也想省掉，可以换官方 Skia 后端跑**同一份代码**（`samples/ImageFacade.AvaloniaNativeDemo`）：它直接复用位图内存，实测 960×720、60 秒托管堆 12.5 MB 恒定、LOH 10.5 MB（就是那 4 块帧池）、分配 0.2 MB/s、GC 1 次；SimdSkia 这条路上托管堆在 70~90 MB 来回、分配约 70 MB/s（就是上面那次 35 秒采样）。差别全在绘制路径，解码和合成一行没改——**要零原生依赖 + AOT 选 SimdSkia，要极致的托管内存曲线选官方后端**，这正是把渲染后端做成可替换的意义。
 
 **还能再省一次拷贝。** 现在每帧要搬两遍全帧：帧池 → 画布（`ImportPixels`）、画布 → `WriteableBitmap`（`CopyPixelsTo`）。第一遍其实是白搬的：如果让画布直接落在帧池那块内存上（一张图只创建一次，之后每帧只是同一块内存换了内容），HUD 就画在解码输出上，最后只剩 `CopyPixelsTo` 这一趟。960×720 一帧 2.6 MB，15 fps 下等于少搬约 39 MB/s。
 

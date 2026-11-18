@@ -80,8 +80,8 @@ internal sealed class RasterBackend : IImageBackend
         int targetHeight = target.Canvas.Height;
         int stride = targetWidth * 4;
 
-        byte[] targetPixels = ArrayPool<byte>.Shared.Rent(stride * targetHeight);
-        byte[] sourcePixels = ArrayPool<byte>.Shared.Rent(layer.Canvas.Width * 4 * layer.Canvas.Height);
+        byte[] targetPixels = PixelBufferPool.Shared.Rent(stride * targetHeight);
+        byte[] sourcePixels = PixelBufferPool.Shared.Rent(layer.Canvas.Width * 4 * layer.Canvas.Height);
         try
         {
             target.Canvas.CopyToStraight(targetPixels, stride);
@@ -102,8 +102,8 @@ internal sealed class RasterBackend : IImageBackend
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(targetPixels);
-            ArrayPool<byte>.Shared.Return(sourcePixels);
+            PixelBufferPool.Shared.Return(targetPixels);
+            PixelBufferPool.Shared.Return(sourcePixels);
         }
     }
 
@@ -358,7 +358,7 @@ internal sealed class RasterBackend : IImageBackend
         int width = target.Canvas.Width;
         int height = target.Canvas.Height;
         int stride = width * 4;
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(stride * height);
+        byte[] buffer = PixelBufferPool.Shared.Rent(stride * height);
         target.Canvas.CopyToStraight(buffer, stride);
 
         Canvas canvas = target.Canvas;
@@ -374,7 +374,7 @@ internal sealed class RasterBackend : IImageBackend
                 // 只有这个引用捕获的计数器能保证缓冲只还回池子一次。
                 if (Interlocked.Exchange(ref returned, 1) == 0)
                 {
-                    ArrayPool<byte>.Shared.Return(buffer);
+                    PixelBufferPool.Shared.Return(buffer);
                 }
             });
         return true;

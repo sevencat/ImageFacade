@@ -65,7 +65,7 @@ internal sealed class DrawingContext
 
         int width = Canvas.Width;
         int height = Canvas.Height;
-        byte[] mask = ArrayPool<byte>.Shared.Rent(width * height);
+        byte[] mask = PixelBufferPool.Shared.Rent(width * height);
         Span<byte> maskSpan = mask.AsSpan(0, width * height);
         maskSpan.Clear();
 
@@ -113,7 +113,7 @@ internal sealed class DrawingContext
         }
 
         int last = _clipMasks.Count - 1;
-        ArrayPool<byte>.Shared.Return(_clipMasks[last]);
+        PixelBufferPool.Shared.Return(_clipMasks[last]);
         _clipMasks.RemoveAt(last);
     }
 
