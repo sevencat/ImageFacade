@@ -10,8 +10,8 @@ using CvScalar = OpenCvSharp.Scalar;
 namespace ImageFacade.Tests.OpenCv;
 
 /// <summary>
-/// OpenCV 后端（M6）的端到端行为：原生能画的（不透明形状/几何/编解码/文字）必须真机跑通，
-/// 原生画不了的（半透明形状、虚线）抛 <see cref="FeatureNotSupportedException"/>。
+/// OpenCV 后端（M6）的端到端行为：形状/几何/编解码/文字全部真机跑通，虚线由核心切分规则提供，
+/// 半透明形状先在包围盒覆盖率层上画再逐像素混进目标（与半透明文字同一条混合路径）。
 /// 文字由核心的托管字形光栅化提供，4/5 一致。
 /// 同一份源码被 <c>ImageFacade.OpenCv4.Tests</c>（OpenCvSharp4 4.13）与
 /// <c>ImageFacade.OpenCv5.Tests</c>（OpenCvSharp5 5.0）各编一遍。
@@ -94,30 +94,188 @@ public sealed class OpenCvBackendTests
     }
 
     [Fact]
-    public void SemiTransparent_Drawing_Is_Rejected()
+    public void Capabilities_Declare_Alpha_And_Dash()
+    {
+        using var backend = new OpenCvBackend();
+
+        Assert.True(backend.Capabilities.HasFlag(BackendCapabilities.AlphaBlending));
+        Assert.True(backend.Capabilities.HasFlag(BackendCapabilities.Dash));
+        Assert.True(backend.Capabilities.HasFlag(BackendCapabilities.DrawShapes));
+    }
+
+    [Fact]
+    public void SemiTransparent_Fill_Blends_Over_Background()
     {
         using var engine = CreateEngine();
         using FacadeImage image = engine.Create(20, 20, Rgba32.White);
 
-        var error = Assert.Throws<FeatureNotSupportedException>(
-            () => image.FillRectangle(new RectF(0, 0, 20, 20), new Rgba32(0, 0, 0, 128)));
+        image.FillRectangle(new RectF(4, 4, 12, 12), new Rgba32(0, 0, 0, 128));
 
-        Assert.Contains("opencv", error.Message, StringComparison.OrdinalIgnoreCase);
+        Rgba32 blended = image.GetPixel(10, 10);
+        Assert.Equal(255, blended.A);
+        Assert.InRange(blended.R, 118, 138);
+        Assert.Equal(blended.R, blended.G);
+        Assert.Equal(blended.R, blended.B);
+
+        // 框外一个像素都不该被碰到
+        Assert.Equal(Rgba32.White, image.GetPixel(1, 1));
     }
 
     [Fact]
-    public void Dash_Is_Rejected()
+    public void SemiTransparent_Line_Blends_And_Keeps_Edges_Clean()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(40, 20, Rgba32.White);
+
+        image.DrawLine(new PointF(0, 10), new PointF(40, 10), new Rgba32(255, 0, 0, 128), width: 4);
+
+        Rgba32 middle = image.GetPixel(20, 10);
+        Assert.Equal(255, middle.A);
+        Assert.InRange(middle.R, 240, 255);
+        Assert.InRange(middle.G, 110, 145);
+        Assert.InRange(middle.B, 110, 145);
+
+        Assert.Equal(Rgba32.White, image.GetPixel(20, 2));
+    }
+
+    [Fact]
+    public void SemiTransparent_Stroked_Rectangle_Blends_On_Its_Edges()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(40, 40, Rgba32.White);
+
+        image.DrawRectangle(new RectF(8, 8, 24, 24), new Rgba32(0, 0, 0, 128), width: 4);
+
+        Rgba32 edge = image.GetPixel(20, 8);
+        Assert.InRange(edge.R, 110, 145);
+        Assert.Equal(Rgba32.White, image.GetPixel(20, 20));
+        Assert.Equal(Rgba32.White, image.GetPixel(2, 2));
+    }
+
+    [Fact]
+    public void SemiTransparent_Fill_On_Transparent_Canvas_Produces_Alpha()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(10, 10, null);
+
+        image.FillRectangle(new RectF(0, 0, 10, 10), new Rgba32(255, 0, 0, 128));
+
+        Rgba32 pixel = image.GetPixel(5, 5);
+        Assert.InRange(pixel.A, 120, 135);
+        Assert.True(pixel.R > 120);
+        Assert.True(pixel.G < 10);
+        Assert.True(pixel.B < 10);
+    }
+
+    [Fact]
+    public void SemiTransparent_Ellipse_And_Polygon_Blend()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(60, 60, Rgba32.White);
+
+        image.FillEllipse(new RectF(4, 4, 24, 24), new Rgba32(0, 0, 255, 128));
+        image.FillPolygon([new PointF(34, 34), new PointF(56, 34), new PointF(45, 56)], new Rgba32(0, 255, 0, 128));
+
+        Rgba32 ellipse = image.GetPixel(16, 16);
+        Assert.InRange(ellipse.B, 240, 255);
+        Assert.InRange(ellipse.R, 110, 145);
+
+        Rgba32 polygon = image.GetPixel(45, 40);
+        Assert.InRange(polygon.G, 240, 255);
+        Assert.InRange(polygon.R, 110, 145);
+    }
+
+    [Fact]
+    public void SemiTransparent_Shapes_Extending_Outside_Canvas_Are_Not_Truncated()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage image = engine.Create(20, 20, Rgba32.White);
+
+        // 覆盖率层按"与画布的交集"建，局部坐标可能是负数：OpenCV 必须照常裁剪而不是画丢
+        image.FillRectangle(new RectF(-10, -10, 40, 40), new Rgba32(0, 0, 0, 128));
+        foreach ((int x, int y) in new[] { (0, 0), (19, 0), (0, 19), (19, 19), (10, 10) })
+        {
+            Assert.InRange(image.GetPixel(x, y).R, 110, 145);
+        }
+
+        // 整条线跨出画布：两端裁剪后仍应该画满整行
+        using FacadeImage line = engine.Create(20, 20, Rgba32.White);
+        line.DrawLine(new PointF(-100, 10), new PointF(100, 10), new Rgba32(0, 0, 0, 128), width: 4);
+        foreach (int x in new[] { 0, 10, 19 })
+        {
+            Assert.InRange(line.GetPixel(x, 10).R, 110, 145);
+        }
+    }
+
+    [Fact]
+    public void SemiTransparent_Dash_Blends_Inside_Segments_Only()
     {
         using var engine = CreateEngine();
         using FacadeImage image = engine.Create(60, 20, Rgba32.White);
 
-        Assert.Throws<FeatureNotSupportedException>(
-            () => image.DrawLine(
-                new PointF(0, 10),
-                new PointF(60, 10),
-                Rgba32.Black,
-                width: 3,
-                new StrokeStyle { DashPattern = [4f, 4f] }));
+        image.DrawLine(
+            new PointF(0, 10),
+            new PointF(60, 10),
+            new Rgba32(0, 0, 0, 128),
+            width: 3,
+            new StrokeStyle { DashPattern = [4f, 4f] });
+
+        // 12px 实 / 12px 虚，从 from 开始：实线段内是半透明黑，虚线段内还是白底
+        Rgba32 on = image.GetPixel(6, 10);
+        Assert.Equal(255, on.A);
+        Assert.InRange(on.R, 115, 140);
+
+        Assert.Equal(Rgba32.White, image.GetPixel(18, 10));
+    }
+
+    [Fact]
+    public void Dash_Draws_Segments_Instead_Of_Solid()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage solid = engine.Create(60, 20, Rgba32.White);
+        using FacadeImage dashed = engine.Create(60, 20, Rgba32.White);
+
+        var style = new StrokeStyle { DashPattern = [4f, 4f] };
+
+        solid.DrawLine(new PointF(0, 10), new PointF(60, 10), Rgba32.Black, width: 3);
+        dashed.DrawLine(new PointF(0, 10), new PointF(60, 10), Rgba32.Black, width: 3, style);
+
+        int solidInk = CountInk(solid);
+        int dashedInk = CountInk(dashed);
+
+        Assert.True(solidInk > 0);
+        Assert.True(dashedInk < solidInk, $"虚线墨迹 {dashedInk} 应少于实线 {solidInk}");
+        Assert.True(dashedInk > solidInk / 4, $"虚线不该只剩零头：{dashedInk} vs 实线 {solidInk}");
+
+        // 图案按线宽换算：4 × 3px = 12px 实、12px 虚，起点从 from 开始
+        Assert.Equal(Rgba32.Black, dashed.GetPixel(6, 10));
+        Assert.Equal(Rgba32.White, dashed.GetPixel(18, 10));
+    }
+
+    [Fact]
+    public void Dash_Works_On_Rectangle_Ellipse_And_Closed_Polyline()
+    {
+        using var engine = CreateEngine();
+        using FacadeImage solid = engine.Create(80, 60, Rgba32.White);
+        using FacadeImage dashed = engine.Create(80, 60, Rgba32.White);
+
+        var style = new StrokeStyle { DashPattern = [3f, 3f] };
+        var rect = new RectF(10, 10, 60, 40);
+        PointF[] triangle = [new(20, 45), new(60, 45), new(40, 15)];
+
+        solid.DrawRectangle(rect, Rgba32.Black, width: 2);
+        solid.DrawEllipse(rect, Rgba32.Black, width: 2);
+        solid.DrawPolyline(triangle, Rgba32.Black, width: 2, closed: true);
+
+        dashed.DrawRectangle(rect, Rgba32.Black, width: 2, style);
+        dashed.DrawEllipse(rect, Rgba32.Black, width: 2, style);
+        dashed.DrawPolyline(triangle, Rgba32.Black, width: 2, closed: true, style);
+
+        int solidInk = CountInk(solid);
+        int dashedInk = CountInk(dashed);
+
+        Assert.True(solidInk > 0);
+        Assert.True(dashedInk < solidInk, $"虚线墨迹 {dashedInk} 应少于实线 {solidInk}");
     }
 
     [Fact]

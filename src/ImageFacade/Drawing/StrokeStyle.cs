@@ -15,8 +15,12 @@ public enum LineJoin
 }
 
 /// <summary>
-/// 描边样式。后端原生支持就原生画；不支持（例如 OpenCV 没有虚线/斜接连接）时
+/// 描边样式。后端原生支持就原生画；不支持（例如 OpenCV 没有混合、没有斜接连接）时
 /// <c>Try*</c> 返回 <c>false</c>，由门面回退到软后端。
+/// <para>
+/// 虚线各后端都支持：原生有 dash 图案的直接用（Skia / ImageSharp），没有的按核心的切分规则
+/// 把轮廓切成实线段再画（OpenCV 走 <c>Polylines</c>）。
+/// </para>
 /// </summary>
 public sealed class StrokeStyle
 {

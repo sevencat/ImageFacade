@@ -83,8 +83,15 @@ internal sealed class DrawingContext
             byte[]? parent = _clipMasks.Count == 0 ? null : _clipMasks[^1];
             for (int y = 0; y < area.Height; y++)
             {
-                ReadOnlySpan<byte> source = coverage.GetRow(y);
-                Span<byte> destination = maskSpan.Slice(((area.Y + y) * width) + area.X, area.Width);
+                (int start, int end) = coverage.GetRowSpan(y);
+                int length = end - start;
+                if (length <= 0)
+                {
+                    continue;
+                }
+
+                ReadOnlySpan<byte> source = coverage.GetRow(y).Slice(start, length);
+                Span<byte> destination = maskSpan.Slice(((area.Y + y) * width) + area.X + start, length);
 
                 if (parent is null)
                 {
@@ -92,7 +99,7 @@ internal sealed class DrawingContext
                     continue;
                 }
 
-                ReadOnlySpan<byte> parentRow = parent.AsSpan(((area.Y + y) * width) + area.X, area.Width);
+                ReadOnlySpan<byte> parentRow = parent.AsSpan(((area.Y + y) * width) + area.X + start, length);
                 for (int i = 0; i < destination.Length; i++)
                 {
                     destination[i] = (byte)PixelOps.Mul255(source[i], parentRow[i]);
@@ -245,7 +252,34 @@ internal sealed class DrawingContext
             ApplyClip(region, coverage);
         }
 
+        // 纯色笔刷按行区间混合：细长形状每行只有几个像素有覆盖率，
+        // 整行交给 RowBlender 等于把包围盒宽度里的空列也扫一遍。
+        if (coverage.HasRowSpans && brush.TryGetSolidColor(out Color solid))
+        {
+            BlendSolidSpans(region, coverage, solid);
+            return;
+        }
+
         brush.Blend(Canvas, region, coverage.Data, coverage.Stride);
+    }
+
+    /// <summary>纯色笔刷的逐行区间混合：跳过整行为空的行，只处理有覆盖率的列。</summary>
+    private void BlendSolidSpans(Rectangle region, CoverageBuffer coverage, Color color)
+    {
+        for (int y = 0; y < region.Height; y++)
+        {
+            (int start, int end) = coverage.GetRowSpan(y);
+            int length = end - start;
+            if (length <= 0)
+            {
+                continue;
+            }
+
+            Span<byte> row = Canvas.GetRow(region.Y + y)
+                .Slice((region.X + start) * Canvas.BytesPerPixel, length * Canvas.BytesPerPixel);
+            ReadOnlySpan<byte> coverageRow = coverage.GetRow(y).Slice(start, length);
+            RowBlender.OverSolid(row, color, coverageRow);
+        }
     }
 
     /// <summary>
@@ -329,11 +363,24 @@ internal sealed class DrawingContext
     {
         byte[] mask = _clipMasks[^1];
         int width = Canvas.Width;
+        bool spans = coverage.HasRowSpans;
 
         for (int y = 0; y < region.Height; y++)
         {
-            ReadOnlySpan<byte> maskRow = mask.AsSpan(((region.Y + y) * width) + region.X, region.Width);
-            Span<byte> coverageRow = coverage.GetRow(y);
+            int start = 0;
+            int end = region.Width;
+
+            if (spans)
+            {
+                (start, end) = coverage.GetRowSpan(y);
+                if (end <= start)
+                {
+                    continue;
+                }
+            }
+
+            ReadOnlySpan<byte> maskRow = mask.AsSpan(((region.Y + y) * width) + region.X + start, end - start);
+            Span<byte> coverageRow = coverage.GetRow(y).Slice(start, end - start);
 
             for (int i = 0; i < coverageRow.Length; i++)
             {

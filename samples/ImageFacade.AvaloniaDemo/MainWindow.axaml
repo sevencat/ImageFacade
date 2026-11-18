@@ -32,7 +32,7 @@
             </Style>
         </StackPanel.Styles>
 
-        <Grid ColumnDefinitions="Auto,Auto,Auto,*" Margin="12,10">
+        <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,*" Margin="12,10">
             <Button x:Name="OpenButton"
                     Content="打开视频…"
                     Click="OnOpenClick" />
@@ -48,6 +48,11 @@
                     IsEnabled="False"
                     Margin="8,0,0,0"
                     Click="OnSaveClick" />
+            <Button x:Name="RtmpButton"
+                    Grid.Column="3"
+                    Content="播放 RTMP 流"
+                    Margin="8,0,0,0"
+                    Click="OnRtmpClick" />
         </Grid>
 
         <Border x:Name="VideoHost" Height="420" Background="Black">

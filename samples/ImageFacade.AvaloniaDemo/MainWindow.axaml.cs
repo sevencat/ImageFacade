@@ -11,6 +11,9 @@ namespace ImageFacade.AvaloniaDemo;
 
 internal sealed partial class MainWindow : Window
 {
+    /// <summary>「播放 RTMP 流」按钮打开的测试流（腾讯云直播 demo 源）。</summary>
+    private const string RtmpStreamUrl = "rtmp://liteavapp.qcloud.com/live/liteavdemoplayerstreamid";
+
     private readonly FrameComposer _composer = new();
     private readonly DispatcherTimer _timer;
     private readonly Stopwatch _fpsClock = Stopwatch.StartNew();
@@ -52,6 +55,7 @@ internal sealed partial class MainWindow : Window
         {
             StatusText.Text = info;
             OpenButton.IsEnabled = false;
+            RtmpButton.IsEnabled = false;
         }
 
         if (initialPath is not null)
@@ -93,6 +97,8 @@ internal sealed partial class MainWindow : Window
     }
 
     private async void OnOpenClick(object? sender, RoutedEventArgs e) => await OpenAsync();
+
+    private void OnRtmpClick(object? sender, RoutedEventArgs e) => OpenPath(RtmpStreamUrl);
 
     private void OnPauseClick(object? sender, RoutedEventArgs e) => TogglePause();
 
@@ -197,8 +203,12 @@ internal sealed partial class MainWindow : Window
         PauseButton.Content = "暂停";
         SaveButton.IsEnabled = false;
         _lastPosition = TimeSpan.MinValue;
-        StatusText.Text = $"解码中：{Path.GetFileName(path)}";
+        StatusText.Text = $"解码中：{DescribeSource(path)}";
     }
+
+    /// <summary>本地文件只显示文件名；<c>rtmp://</c> 之类的流地址没有文件名，按原样显示。</summary>
+    private static string DescribeSource(string path) =>
+        path.Contains("://", StringComparison.Ordinal) ? path : Path.GetFileName(path);
 
     private void TogglePause()
     {

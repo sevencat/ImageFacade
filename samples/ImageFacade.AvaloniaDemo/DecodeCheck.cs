@@ -15,7 +15,9 @@ internal static class DecodeCheck
         var log = new List<string>();
         try
         {
-            if (!File.Exists(videoPath))
+            // rtmp:// 之类的流地址没有本地文件可查，直接交给 FFmpeg 打开
+            bool remote = videoPath.Contains("://", StringComparison.Ordinal);
+            if (!remote && !File.Exists(videoPath))
             {
                 log.Add($"文件不存在：{videoPath}");
                 return 2;

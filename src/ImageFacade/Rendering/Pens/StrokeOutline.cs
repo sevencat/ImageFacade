@@ -275,17 +275,24 @@ internal static class StrokeOutline
     }
 
     /// <summary>
-    /// 按虚线图案把折线切成若干开段，每段独立描边（所以每段两端都有端帽）。
-    /// 闭合轮廓上跨过起点的两段会重新拼成一段；整圈都在实线段内时按闭合轮廓处理（不补端帽）。
+    /// 按虚线图案把折线切成若干实线段（每段独立描边，所以两端按端帽处理）。
+    /// 闭合轮廓上跨过起点的两段会重新拼成一段；整圈都落在同一段实线里时，返回的点列首尾同点，
+    /// 调用方按闭合轮廓描边即可（起点处不补端帽）。
+    /// <para>
+    /// 抽成公开给后端用的入口：OpenCV 没有 dash 图案，只能自己按图案切成折线再画——
+    /// 切分规则必须和核心光栅完全一致，所以只有这一份实现。
+    /// </para>
     /// </summary>
-    private static void EmitDashed(
-        PathBuilder builder,
-        ReadOnlySpan<PointF> points,
-        bool closed,
-        float radius,
-        in StrokeStyle style)
+    internal static List<PointF[]> SplitDashes(ReadOnlySpan<PointF> points, bool closed, in StrokeStyle style)
     {
-        float[] pattern = style.DashPattern!;
+        var result = new List<PointF[]>();
+        float[]? maybePattern = style.DashPattern;
+        if (points.Length == 0 || maybePattern is not { Length: > 0 })
+        {
+            return result;
+        }
+
+        float[] pattern = maybePattern;
 
         double total = 0d;
         for (int i = 0; i < pattern.Length; i++)
@@ -295,7 +302,7 @@ internal static class StrokeOutline
 
         if (!(total > 0d))
         {
-            return;
+            return result;
         }
 
         // 相位：DashOffset 为正表示图案整体往前推（与 SVG 的 dashoffset 同向）
@@ -418,10 +425,8 @@ internal static class StrokeOutline
             List<PointF> merged = runs[0];
             if (merged.Count > 1 && SamePoint(merged[0], merged[^1]))
             {
-                // 整圈都在实线内：按闭合轮廓描边，起点处不补端帽
-                merged.RemoveAt(merged.Count - 1);
-                AddSolid(builder, CollectionsMarshal.AsSpan(merged), true, radius, style);
-                return;
+                // 整圈都在实线内：交回首尾同点的一条点列，按闭合轮廓描边（起点处不补端帽）
+                return [merged.ToArray()];
             }
         }
 
@@ -429,8 +434,25 @@ internal static class StrokeOutline
         {
             if (dashed.Count > 0)
             {
-                AddSolid(builder, CollectionsMarshal.AsSpan(dashed), false, radius, style);
+                result.Add(dashed.ToArray());
             }
+        }
+
+        return result;
+    }
+
+    /// <summary>把 <see cref="SplitDashes"/> 切出来的实线段逐条描边。</summary>
+    private static void EmitDashed(
+        PathBuilder builder,
+        ReadOnlySpan<PointF> points,
+        bool closed,
+        float radius,
+        in StrokeStyle style)
+    {
+        foreach (PointF[] run in SplitDashes(points, closed, style))
+        {
+            bool loop = run.Length > 2 && SamePoint(run[0], run[^1]);
+            AddSolid(builder, loop ? run.AsSpan(0, run.Length - 1) : run, loop, radius, style);
         }
     }
 

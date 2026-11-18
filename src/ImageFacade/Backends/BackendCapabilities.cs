@@ -22,6 +22,7 @@ public enum BackendCapabilities
     /// <summary><c>color.A &lt; 255</c> 的绘制（source-over 混合）。</summary>
     AlphaBlending = 1 << 5,
 
+    /// <summary>虚线描边（<see cref="StrokeStyle.DashPattern"/>）。</summary>
     Dash = 1 << 6,
 
     LossyEncode = 1 << 7,

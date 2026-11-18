@@ -21,6 +21,8 @@ using CvRotatedRect = OpenCvSharp.RotatedRect;
 using CvScalar = OpenCvSharp.Scalar;
 using CvSize = OpenCvSharp.Size;
 using CvSize2f = OpenCvSharp.Size2f;
+using CorePointF = ImageFacade.Rendering.PointF;
+using CoreStrokeStyle = ImageFacade.Rendering.StrokeStyle;
 
 namespace ImageFacade.OpenCvSharp;
 
@@ -36,9 +38,16 @@ namespace ImageFacade.OpenCvSharp;
 /// 软后端用预乘 <c>Rgba32</c>，它们原生就是 RGBA，所以**唯独 OpenCV 是 BGRA 的例外**。
 /// </para>
 /// <para>
-/// 形状绘制受 OpenCV 本身限制：<b>没有 alpha 混合</b>，<c>color.A &lt; 255</c> 的
-/// <c>Fill/Draw/Line</c> 一律返回 <c>false</c>，由门面抛 <see cref="FeatureNotSupportedException"/>；
-/// 需要半透明形状时在调用方自行合成，或改用 Skia / ImageSharp。
+/// 形状绘制：OpenCV 自己的 <c>Fill/Draw/Line</c> 是**覆盖写像素**，没有混合模式。半透明
+/// （<c>color.A &lt; 255</c>）的请求因此不走它们直画目标，而是先在形状包围盒大小的 8 位全 0 层上照常画一遍
+/// ——AA 边缘自然留下 0~255 的覆盖率——再按覆盖率把颜色逐像素混进目标，和半透明文字同一套公式。
+/// 代价只是每个半透明形状一块包围盒大小的单通道缓冲；不透明形状仍直接画，一分钱不多花。
+/// </para>
+/// <para>
+/// <b>虚线是支持的</b>：OpenCV 的 <c>Line/Polylines</c> 没有 dash 图案，这里按核心那套虚线切分规则
+/// （<see cref="ImageFacade.Rendering.StrokeOutline.SplitDashes"/>，含 <c>DashOffset</c>）先把轮廓切成
+/// 若干实线段，再逐段 <c>Polylines</c>。纯几何，不需要中间位图。
+/// 端帽/连接方式仍由 OpenCV 决定（没有圆头/方头），和实线描边的现状一致。
 /// </para>
 /// <para>
 /// 文字：<b>不用 <c>Cv2.PutText</c></b>（Hershey 只有 ASCII、外观差得远）。4/5 都复用核心
@@ -91,8 +100,8 @@ public sealed class OpenCvBackend : IImageBackend
     public Version Version => typeof(OpenCvBackend).Assembly.GetName().Version ?? new Version(0, 1, 0);
 
     /// <summary>
-    /// 注意：**没有** <see cref="BackendCapabilities.AlphaBlending"/>、<see cref="BackendCapabilities.Dash"/>。
-    /// 文字由核心的托管字形光栅化提供（含 CJK），4/5 一致。
+    /// 全能力，包括 <see cref="BackendCapabilities.AlphaBlending"/>：半透明形状先画到包围盒大小的
+    /// 覆盖率层，再逐像素混进 BGRA（与半透明文字同一条混合路径）。
     /// </summary>
     public BackendCapabilities Capabilities =>
         BackendCapabilities.Resize
@@ -100,6 +109,8 @@ public sealed class OpenCvBackend : IImageBackend
         | BackendCapabilities.DrawPoints
         | BackendCapabilities.DrawText
         | BackendCapabilities.DrawTextUnicode
+        | BackendCapabilities.AlphaBlending
+        | BackendCapabilities.Dash
         | BackendCapabilities.LossyEncode
         | BackendCapabilities.ExifOrientation;
 
@@ -226,7 +237,9 @@ public sealed class OpenCvBackend : IImageBackend
     }
 
     /// <summary>
-    /// 1:1 贴图（letterbox 用）。OpenCV 后端没有 alpha 混合能力，这里是**直接覆盖**目标区域（RGBA 直通，不预乘）。
+    /// 1:1 贴图（letterbox 用）。这里仍是**直接覆盖**目标区域（RGBA 直通，不预乘）——
+    /// <see cref="BackendCapabilities.AlphaBlending"/> 说的是带 <c>color</c> 参数的绘制，
+    /// 贴图按"缩放结果写回目标"的语义走，源图带 alpha 时按原样搬过去。
     /// </summary>
     public bool TryDrawFrame(IFrame destination, IFrame source, PointF offset)
     {
@@ -264,14 +277,37 @@ public sealed class OpenCvBackend : IImageBackend
 
     public bool TryDrawPoint(IFrame frame, in PointSpec spec)
     {
-        if (!IsFinite(spec.Point) || !IsValid(spec.Radius) || !CanDraw(spec.Color))
+        if (!IsFinite(spec.Point) || !IsValid(spec.Radius))
         {
             return false;
         }
 
-        var target = (OpenCvFrame)frame;
+        Rgba32 color = spec.Color;
+        if (!IsVisible(color))
+        {
+            return true;
+        }
+
+        PointF center = spec.Point;
+        bool antialias = spec.Antialias;
         int radius = Math.Max(1, (int)MathF.Round(spec.Radius));
-        Cv2.Circle(target.Mat, Quantize(spec.Point), radius, ToScalar(spec.Color), -1, LineType(spec.Antialias));
+        float extent = radius + 2f;
+
+        var target = (OpenCvFrame)frame;
+        DrawColor(
+            target.Mat,
+            color,
+            center.X - extent,
+            center.Y - extent,
+            center.X + extent,
+            center.Y + extent,
+            (canvas, origin) => Cv2.Circle(
+                canvas,
+                Quantize(center, origin),
+                radius,
+                Ink(canvas, color),
+                -1,
+                LineType(antialias)));
         return true;
     }
 
@@ -282,20 +318,35 @@ public sealed class OpenCvBackend : IImageBackend
             return false;
         }
 
-        if (!CanDraw(spec.Color) || (spec.Style?.HasDash ?? false))
+        Rgba32 color = spec.Color;
+        if (!IsVisible(color))
         {
-            return false;
+            return true;
         }
 
+        // in 参数不能进 lambda：先把要用的字段抄出来
+        PointF from = spec.From;
+        PointF to = spec.To;
+        float width = spec.Width;
+        StrokeStyle? style = spec.Style;
+        bool antialias = style?.Antialias ?? true;
+        bool dashed = style?.HasDash ?? false;
+        int thickness = Thickness(width);
+
         var target = (OpenCvFrame)frame;
-        bool antialias = spec.Style?.Antialias ?? true;
-        Cv2.Line(
-            target.Mat,
-            Quantize(spec.From),
-            Quantize(spec.To),
-            ToScalar(spec.Color),
-            Thickness(spec.Width),
-            LineType(antialias));
+        ExpandPoints([from, to], (thickness * 0.5f) + 2f, out float minX, out float minY, out float maxX, out float maxY);
+
+        DrawColor(target.Mat, color, minX, minY, maxX, maxY, (canvas, origin) =>
+        {
+            CvScalar ink = Ink(canvas, color);
+            if (dashed)
+            {
+                StrokeDashed(canvas, [from, to], false, ink, width, style!, origin);
+                return;
+            }
+
+            Cv2.Line(canvas, Quantize(from, origin), Quantize(to, origin), ink, thickness, LineType(antialias));
+        });
         return true;
     }
 
@@ -306,20 +357,35 @@ public sealed class OpenCvBackend : IImageBackend
             return false;
         }
 
-        if (!CanDraw(spec.Color) || (spec.Style?.HasDash ?? false))
+        Rgba32 color = spec.Color;
+        if (!IsVisible(color))
         {
-            return false;
+            return true;
         }
 
+        // PolylineSpec 是 ref struct，lambda 里只能用抄出来的副本
+        PointF[] points = spec.Points.ToArray();
+        bool closed = spec.Closed;
+        float width = spec.Width;
+        StrokeStyle? style = spec.Style;
+        bool antialias = style?.Antialias ?? true;
+        bool dashed = style?.HasDash ?? false;
+        int thickness = Thickness(width);
+
         var target = (OpenCvFrame)frame;
-        bool antialias = spec.Style?.Antialias ?? true;
-        Cv2.Polylines(
-            target.Mat,
-            [ToPoints(spec.Points)],
-            spec.Closed,
-            ToScalar(spec.Color),
-            Thickness(spec.Width),
-            LineType(antialias));
+        ExpandPoints(points, (thickness * 0.5f) + 2f, out float minX, out float minY, out float maxX, out float maxY);
+
+        DrawColor(target.Mat, color, minX, minY, maxX, maxY, (canvas, origin) =>
+        {
+            CvScalar ink = Ink(canvas, color);
+            if (dashed)
+            {
+                StrokeDashed(canvas, points, closed, ink, width, style!, origin);
+                return;
+            }
+
+            Cv2.Polylines(canvas, [ToPoints(points, origin)], closed, ink, thickness, LineType(antialias));
+        });
         return true;
     }
 
@@ -330,31 +396,65 @@ public sealed class OpenCvBackend : IImageBackend
             return false;
         }
 
-        if (!CanDraw(spec.Color) || (spec.Style?.HasDash ?? false))
+        Rgba32 color = spec.Color;
+        if (!IsVisible(color))
         {
-            return false;
+            return true;
         }
 
+        RectF rect = spec.Rect;
+        float width = spec.Width;
+        StrokeStyle? style = spec.Style;
+        bool antialias = style?.Antialias ?? true;
+        bool dashed = style?.HasDash ?? false;
+        int thickness = Thickness(width);
+        float padding = (thickness * 0.5f) + 2f;
+
         var target = (OpenCvFrame)frame;
-        bool antialias = spec.Style?.Antialias ?? true;
-        Cv2.Rectangle(
+        DrawColor(
             target.Mat,
-            ToRect(spec.Rect),
-            ToScalar(spec.Color),
-            Thickness(spec.Width),
-            LineType(antialias));
+            color,
+            rect.X - padding,
+            rect.Y - padding,
+            rect.X + rect.Width + padding,
+            rect.Y + rect.Height + padding,
+            (canvas, origin) =>
+            {
+                CvScalar ink = Ink(canvas, color);
+                if (dashed)
+                {
+                    StrokeDashed(canvas, RectContour(rect), true, ink, width, style!, origin);
+                    return;
+                }
+
+                Cv2.Rectangle(canvas, ToRect(rect, origin), ink, thickness, LineType(antialias));
+            });
         return true;
     }
 
     public bool TryFillRectangle(IFrame frame, in FilledRectSpec spec)
     {
-        if (spec.Rect.IsEmpty || !IsFinite(spec.Rect) || !CanDraw(spec.Color))
+        if (spec.Rect.IsEmpty || !IsFinite(spec.Rect))
         {
             return false;
         }
 
+        Rgba32 color = spec.Color;
+        if (!IsVisible(color))
+        {
+            return true;
+        }
+
+        RectF rect = spec.Rect;
         var target = (OpenCvFrame)frame;
-        Cv2.Rectangle(target.Mat, ToRect(spec.Rect), ToScalar(spec.Color), -1, CvLineTypes.Link8);
+        DrawColor(
+            target.Mat,
+            color,
+            rect.X - 1f,
+            rect.Y - 1f,
+            rect.X + rect.Width + 1f,
+            rect.Y + rect.Height + 1f,
+            (canvas, origin) => Cv2.Rectangle(canvas, ToRect(rect, origin), Ink(canvas, color), -1, CvLineTypes.Link8));
         return true;
     }
 
@@ -365,44 +465,188 @@ public sealed class OpenCvBackend : IImageBackend
             return false;
         }
 
-        if (!CanDraw(spec.Color) || (spec.Style?.HasDash ?? false))
+        Rgba32 color = spec.Color;
+        if (!IsVisible(color))
         {
-            return false;
+            return true;
         }
 
+        RectF bounds = spec.Bounds;
+        float width = spec.Width;
+        StrokeStyle? style = spec.Style;
+        bool antialias = style?.Antialias ?? true;
+        bool dashed = style?.HasDash ?? false;
+        int thickness = Thickness(width);
+        float padding = (thickness * 0.5f) + 2f;
+
         var target = (OpenCvFrame)frame;
-        bool antialias = spec.Style?.Antialias ?? true;
-        Cv2.Ellipse(
+        DrawColor(
             target.Mat,
-            ToRotatedRect(spec.Bounds),
-            ToScalar(spec.Color),
-            Thickness(spec.Width),
-            LineType(antialias));
+            color,
+            bounds.X - padding,
+            bounds.Y - padding,
+            bounds.X + bounds.Width + padding,
+            bounds.Y + bounds.Height + padding,
+            (canvas, origin) =>
+            {
+                CvScalar ink = Ink(canvas, color);
+                if (dashed)
+                {
+                    StrokeDashed(canvas, EllipseContour(bounds), true, ink, width, style!, origin);
+                    return;
+                }
+
+                Cv2.Ellipse(canvas, ToRotatedRect(bounds, origin), ink, thickness, LineType(antialias));
+            });
         return true;
     }
 
     public bool TryFillEllipse(IFrame frame, in FilledEllipseSpec spec)
     {
-        if (spec.Bounds.IsEmpty || !IsFinite(spec.Bounds) || !CanDraw(spec.Color))
+        if (spec.Bounds.IsEmpty || !IsFinite(spec.Bounds))
         {
             return false;
         }
 
+        Rgba32 color = spec.Color;
+        if (!IsVisible(color))
+        {
+            return true;
+        }
+
+        RectF bounds = spec.Bounds;
         var target = (OpenCvFrame)frame;
-        Cv2.Ellipse(target.Mat, ToRotatedRect(spec.Bounds), ToScalar(spec.Color), -1, CvLineTypes.AntiAlias);
+        DrawColor(
+            target.Mat,
+            color,
+            bounds.X - 1f,
+            bounds.Y - 1f,
+            bounds.X + bounds.Width + 1f,
+            bounds.Y + bounds.Height + 1f,
+            (canvas, origin) => Cv2.Ellipse(canvas, ToRotatedRect(bounds, origin), Ink(canvas, color), -1, CvLineTypes.AntiAlias));
         return true;
     }
 
     public bool TryFillPolygon(IFrame frame, in PolygonSpec spec)
     {
-        if (spec.Points.Length < 3 || !AllFinite(spec.Points) || !CanDraw(spec.Color))
+        if (spec.Points.Length < 3 || !AllFinite(spec.Points))
         {
             return false;
         }
 
+        Rgba32 color = spec.Color;
+        if (!IsVisible(color))
+        {
+            return true;
+        }
+
+        PointF[] points = spec.Points.ToArray();
         var target = (OpenCvFrame)frame;
-        Cv2.FillPoly(target.Mat, [ToPoints(spec.Points)], ToScalar(spec.Color), CvLineTypes.AntiAlias);
+        ExpandPoints(points, 1f, out float minX, out float minY, out float maxX, out float maxY);
+
+        DrawColor(
+            target.Mat,
+            color,
+            minX,
+            minY,
+            maxX,
+            maxY,
+            (canvas, origin) => Cv2.FillPoly(canvas, [ToPoints(points, origin)], Ink(canvas, color), CvLineTypes.AntiAlias));
         return true;
+    }
+
+    // ---- 虚线 ----
+
+    /// <summary>
+    /// 虚线描边：OpenCV 的 <c>Line/Polylines</c> 没有 dash 图案，这里按核心那套规则
+    /// （<see cref="ImageFacade.Rendering.StrokeOutline.SplitDashes"/>，含 <c>DashOffset</c>、奇数图案重复）
+    /// 把轮廓切成若干实线段，再逐段 <c>Polylines</c>。纯几何：不建中间位图，也不碰像素混合。
+    /// 端帽仍是 OpenCV 的平头，和实线描边一致。<c>ink</c> 是画到目标图时的真实颜色、画到覆盖率层时的纯白
+    /// （见 <see cref="Ink"/>）；<c>origin</c> 是目标图坐标偏移（覆盖率层 = 包围盒左上角，直接画时为 0）。
+    /// </summary>
+    private static void StrokeDashed(
+        CvMat mat,
+        ReadOnlySpan<PointF> contour,
+        bool closed,
+        CvScalar ink,
+        float width,
+        StrokeStyle style,
+        CvPoint origin)
+    {
+        if (contour.Length < 2)
+        {
+            return;
+        }
+
+        // 公共样式的图案单位是"线宽倍数"，核心的 StrokeStyle 直接按像素吃
+        var pixelStyle = CoreStrokeStyle.Create(
+            (ImageFacade.Rendering.LineJoin)style.Join,
+            (ImageFacade.Rendering.LineCap)style.Cap,
+            style.MiterLimit,
+            style.DashPattern,
+            style.DashOffset,
+            width);
+
+        var source = new CorePointF[contour.Length];
+        for (int i = 0; i < contour.Length; i++)
+        {
+            source[i] = new CorePointF(contour[i].X, contour[i].Y);
+        }
+
+        int thickness = Thickness(width);
+        CvLineTypes lineType = LineType(style.Antialias);
+
+        foreach (CorePointF[] run in ImageFacade.Rendering.StrokeOutline.SplitDashes(source, closed, pixelStyle))
+        {
+            if (run.Length < 2)
+            {
+                continue;
+            }
+
+            // 整圈落在同一段实线里时核心给回首尾同点的点列：按闭合轮廓画，起点不重复
+            bool loop = run.Length > 2 && run[0].X == run[^1].X && run[0].Y == run[^1].Y;
+            int count = loop ? run.Length - 1 : run.Length;
+            var points = new CvPoint[count];
+            for (int i = 0; i < count; i++)
+            {
+                points[i] = Quantize(new PointF(run[i].X, run[i].Y), origin);
+            }
+
+            Cv2.Polylines(mat, [points], loop, ink, thickness, lineType);
+        }
+    }
+
+    /// <summary>矩形描边轮廓（顺时针四个角，闭合）。</summary>
+    private static PointF[] RectContour(RectF rect) =>
+    [
+        new PointF(rect.X, rect.Y),
+        new PointF(rect.X + rect.Width, rect.Y),
+        new PointF(rect.X + rect.Width, rect.Y + rect.Height),
+        new PointF(rect.X, rect.Y + rect.Height),
+    ];
+
+    /// <summary>
+    /// 椭圆描边的折线近似：周长上约 2 px 一个点（24~512 段）。虚线切分需要真实折线长度，
+    /// 直接 <c>Cv2.Ellipse</c> 没法按弧长切。
+    /// </summary>
+    private static PointF[] EllipseContour(RectF bounds)
+    {
+        float radiusX = bounds.Width * 0.5f;
+        float radiusY = bounds.Height * 0.5f;
+        float centerX = bounds.X + radiusX;
+        float centerY = bounds.Y + radiusY;
+
+        int segments = (int)MathF.Ceiling(MathF.Tau * MathF.Max(radiusX, radiusY) / 2f);
+        segments = Math.Clamp(segments, 24, 512);
+
+        var points = new PointF[segments];
+        for (int i = 0; i < segments; i++)
+        {
+            float angle = MathF.Tau * i / segments;
+            points[i] = new PointF(centerX + (MathF.Cos(angle) * radiusX), centerY + (MathF.Sin(angle) * radiusY));
+        }
+
+        return points;
     }
 
     // ---- 文字 ----
@@ -754,36 +998,168 @@ public sealed class OpenCvBackend : IImageBackend
 
     // ---- 内部：绘制辅助 ----
 
-    /// <summary>OpenCV 不做 alpha 混合，半透明请求一律交给门面回退。</summary>
-    private static bool CanDraw(Rgba32 color) => color.A == 255;
+    /// <summary>A = 0 什么都不用画；其余都支持（A &lt; 255 走覆盖率层 + 逐像素混合）。</summary>
+    private static bool IsVisible(Rgba32 color) => color.A != 0;
 
     private static CvScalar ToScalar(Rgba32 color) => new(color.B, color.G, color.R, color.A);
 
-    /// <summary>corner 坐标 → 像素中心（OpenCV 的整数坐标等价于像素中心，misc §G.2）。</summary>
-    private static CvPoint Quantize(PointF point)
-        => new((int)MathF.Round(point.X - 0.5f), (int)MathF.Round(point.Y - 0.5f));
+    /// <summary>
+    /// 画到哪张图就用哪个墨色：直接画时是真实颜色；画到单通道覆盖率层时必须是纯白，
+    /// 这样 AA 打完折剩下的灰度才正好是覆盖率。
+    /// </summary>
+    private static CvScalar Ink(CvMat canvas, Rgba32 color)
+        => canvas.Channels() == 1 ? new CvScalar(255) : ToScalar(color);
 
-    private static CvRect ToRect(RectF rect) => new(
-        (int)MathF.Round(rect.X - 0.5f),
-        (int)MathF.Round(rect.Y - 0.5f),
+    /// <summary>
+    /// 统一的形状绘制入口。<paramref name="color"/> 不透明时直接画目标 <c>Mat</c>；
+    /// 半透明时先在形状包围盒大小的 8 位全 0 层上照常画一遍（AA 边缘得到 0~255 的覆盖率），
+    /// 再按覆盖率把颜色混进目标——和半透明文字同一套逐像素混合，不需要全图临时层。
+    /// <para>
+    /// <paramref name="paint"/> 收到"画到哪张图"和"世界坐标减多少才是该图坐标"，
+    /// 所以同一份绘制代码两条路径都能用（OpenCV 的绘制坐标随层平移，亚像素相位不变）。
+    /// </para>
+    /// </summary>
+    private static void DrawColor(
+        CvMat mat,
+        Rgba32 color,
+        float minX,
+        float minY,
+        float maxX,
+        float maxY,
+        Action<CvMat, CvPoint> paint)
+    {
+        if (color.A == 255)
+        {
+            paint(mat, default);
+            return;
+        }
+
+        if (!TryGetLayerBounds(mat, minX, minY, maxX, maxY, out CvRect layer))
+        {
+            return;
+        }
+
+        using var mask = new CvMat(layer.Height, layer.Width, CvMatType.CV_8UC1, new CvScalar(0));
+        paint(mask, new CvPoint(layer.X, layer.Y));
+        BlendCoverage(mat, mask, layer.X, layer.Y, color);
+    }
+
+    /// <summary>形状包围盒 → 整像素矩形并裁剪到画布；与画布没有交集时返回 <c>false</c>。</summary>
+    private static bool TryGetLayerBounds(
+        CvMat mat,
+        float minX,
+        float minY,
+        float maxX,
+        float maxY,
+        out CvRect bounds)
+    {
+        int left = Math.Max(0, (int)MathF.Floor(minX));
+        int top = Math.Max(0, (int)MathF.Floor(minY));
+        int right = Math.Min(mat.Cols, (int)MathF.Ceiling(maxX));
+        int bottom = Math.Min(mat.Rows, (int)MathF.Ceiling(maxY));
+
+        if (right <= left || bottom <= top)
+        {
+            bounds = default;
+            return false;
+        }
+
+        bounds = new CvRect(left, top, right - left, bottom - top);
+        return true;
+    }
+
+    /// <summary>折线外包框（用于推导覆盖率层的大小）。</summary>
+    private static void ExpandPoints(
+        ReadOnlySpan<PointF> points,
+        float padding,
+        out float minX,
+        out float minY,
+        out float maxX,
+        out float maxY)
+    {
+        minX = float.MaxValue;
+        minY = float.MaxValue;
+        maxX = float.MinValue;
+        maxY = float.MinValue;
+
+        foreach (PointF point in points)
+        {
+            minX = MathF.Min(minX, point.X);
+            minY = MathF.Min(minY, point.Y);
+            maxX = MathF.Max(maxX, point.X);
+            maxY = MathF.Max(maxY, point.Y);
+        }
+
+        minX -= padding;
+        minY -= padding;
+        maxX += padding;
+        maxY += padding;
+    }
+
+    /// <summary>
+    /// 把覆盖率层按 <paramref name="color"/> 混进 BGRA 直通像素，公式与 <see cref="BlendGlyphs"/> 一致：
+    /// 颜色线性插值、alpha 按 source-over 累加。目标不透明时（最常见的场景）就是精确的 src-over。
+    /// </summary>
+    private static unsafe void BlendCoverage(CvMat mat, CvMat mask, int left, int top, Rgba32 color)
+    {
+        byte* data = (byte*)mat.Data;
+        long step = mat.Step();
+        byte* coverageData = (byte*)mask.Data;
+        long coverageStep = mask.Step();
+        float shapeAlpha = color.A / 255f;
+        int width = mask.Cols;
+        int height = mask.Rows;
+
+        for (int row = 0; row < height; row++)
+        {
+            byte* coverageRow = coverageData + (row * coverageStep);
+            byte* pixel = data + ((top + row) * step) + (left * 4);
+
+            for (int col = 0; col < width; col++, pixel += 4)
+            {
+                byte coverage = coverageRow[col];
+                if (coverage == 0)
+                {
+                    continue;
+                }
+
+                float alpha = (coverage / 255f) * shapeAlpha;
+                float inverse = 1f - alpha;
+                pixel[0] = BlendChannel(color.B, pixel[0], alpha);
+                pixel[1] = BlendChannel(color.G, pixel[1], alpha);
+                pixel[2] = BlendChannel(color.R, pixel[2], alpha);
+                pixel[3] = (byte)Math.Clamp(MathF.Round((alpha * 255f) + (pixel[3] * inverse)), 0f, 255f);
+            }
+        }
+    }
+
+    /// <summary>corner 坐标 → 像素中心（OpenCV 的整数坐标等价于像素中心，misc §G.2）。</summary>
+    private static CvPoint Quantize(PointF point, CvPoint origin = default)
+        => new(
+            (int)MathF.Round(point.X - 0.5f) - origin.X,
+            (int)MathF.Round(point.Y - 0.5f) - origin.Y);
+
+    private static CvRect ToRect(RectF rect, CvPoint origin = default) => new(
+        (int)MathF.Round(rect.X - 0.5f) - origin.X,
+        (int)MathF.Round(rect.Y - 0.5f) - origin.Y,
         Math.Max(1, (int)MathF.Round(rect.Width)),
         Math.Max(1, (int)MathF.Round(rect.Height)));
 
-    private static CvRotatedRect ToRotatedRect(RectF bounds)
+    private static CvRotatedRect ToRotatedRect(RectF bounds, CvPoint origin = default)
     {
         PointF center = bounds.Center;
         return new CvRotatedRect(
-            new CvPoint2f(center.X - 0.5f, center.Y - 0.5f),
+            new CvPoint2f(center.X - 0.5f - origin.X, center.Y - 0.5f - origin.Y),
             new CvSize2f(bounds.Width, bounds.Height),
             0f);
     }
 
-    private static CvPoint[] ToPoints(ReadOnlySpan<PointF> points)
+    private static CvPoint[] ToPoints(ReadOnlySpan<PointF> points, CvPoint origin = default)
     {
         var result = new CvPoint[points.Length];
         for (int i = 0; i < points.Length; i++)
         {
-            result[i] = Quantize(points[i]);
+            result[i] = Quantize(points[i], origin);
         }
 
         return result;
@@ -830,7 +1206,7 @@ public sealed class OpenCvBackend : IImageBackend
 
     /// <summary>
     /// 把 A8 字形覆盖位图按覆盖率混进 BGRA 直通像素。混合在直通空间做，
-    /// 所以半透明文字也能正确合成（形状绘制仍不支持 alpha，见 <see cref="CanDraw"/>）。
+    /// 所以半透明文字也能正确合成（半透明形状走 <see cref="BlendCoverage"/>，公式相同）。
     /// </summary>
     private static unsafe void BlendGlyphs(CvMat mat, GlyphLayout layout, int originX, int originY, Rgba32 color)
     {

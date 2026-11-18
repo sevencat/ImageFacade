@@ -133,11 +133,24 @@ internal sealed unsafe class VideoPlayer : IDisposable
 
         try
         {
+            // 网络源（rtmp:// http:// …）没有本地文件可校验，读写都要给超时：
+            // 服务器不可达时 avformat_open_input / av_read_frame 会一直阻塞，解码线程连
+            // Dispose 的 Join 都退不出来。单位是微秒，这里 5 秒。
+            //
+            // 注意只能用 rw_timeout：rtmp 协议的 timeout 是"等推流连接"的监听超时，
+            // 设了它 FFmpeg 会去 bind 服务器地址（listen 模式），必然报 -10049。
+            AVDictionary* options = null;
+            if (path.Contains("://", StringComparison.Ordinal))
+            {
+                ffmpeg.av_dict_set(&options, "rw_timeout", "5000000", 0);
+            }
+
             AVFormatContext* opened = null;
-            int ret = ffmpeg.avformat_open_input(&opened, path, null, null);
+            int ret = ffmpeg.avformat_open_input(&opened, path, null, &options);
+            ffmpeg.av_dict_free(&options);
             if (ret < 0)
             {
-                Fail("打开文件失败", ret);
+                Fail("打开失败", ret);
                 return;
             }
 
@@ -401,5 +414,8 @@ internal sealed unsafe class VideoPlayer : IDisposable
         {
             _error = message;
         }
+
+        // 无 UI 场景（--decode-check / --open）也要能看到失败原因
+        Console.Error.WriteLine($"[decode] {message}");
     }
 }

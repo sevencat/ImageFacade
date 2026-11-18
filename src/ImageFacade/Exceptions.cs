@@ -14,7 +14,7 @@ public class ImageBackendException : Exception
 
 /// <summary>
 /// 后端不具备该能力。库不做跨后端回退，需要另一种渲染时请显式换用支持该能力的后端
-/// （例如 OpenCV 不支持半透明形状，可改用 Skia / ImageSharp）。
+/// （列在 <c>BackendCapabilities</c> 里，用前先查 <c>Capabilities</c>）。
 /// </summary>
 public sealed class FeatureNotSupportedException : NotSupportedException
 {
