@@ -26,8 +26,10 @@ internal sealed partial class MainWindow : Window
     private double _fps;
     private TimeSpan _lastPosition = TimeSpan.MinValue;
 
-    // 临时诊断：--mem 每 2 秒往 stderr 打一行内存明细
-    private readonly bool _traceMemory = Environment.GetCommandLineArgs().Contains("--mem");
+    // 临时诊断：--mem 每 2 秒往 stderr 打一行内存明细；
+    // --mem-gc 在每次采样前强制做一次完全回收 + 压缩，用来区分「垃圾没回收」和「真的留住了」
+    private readonly bool _traceMemory = Environment.GetCommandLineArgs().Contains("--mem") || Environment.GetCommandLineArgs().Contains("--mem-gc");
+    private readonly bool _collectBeforeTrace = Environment.GetCommandLineArgs().Contains("--mem-gc");
 
     // --shot <png> / --save-frame <png>：攒够若干帧后自动执行并退出，窗口挪到屏幕外，不抢前台
     private readonly string? _shotPath;
@@ -74,14 +76,25 @@ internal sealed partial class MainWindow : Window
 
     private void DumpMemory()
     {
+        if (_collectBeforeTrace)
+        {
+            // 阻塞式完全回收 + 压缩：heap 掉不下来就是真持有，掉下来只是 GC 还没轮到
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+        }
+
         using Process self = Process.GetCurrentProcess();
         double mb = 1048576d;
         GCMemoryInfo info = GC.GetGCMemoryInfo();
         ReadOnlySpan<GCGenerationInfo> gens = info.GenerationInfo;
+
+        // committed 掉不下去 → GC 保留了堆段（不还给 OS）；committed 掉了而 ws 不掉 → 原生侧（纹理/surface）
         Console.Error.WriteLine(
-            $"[mem] {DateTime.Now:HH:mm:ss} heap={info.HeapSizeBytes / mb:0.0} " +
+            $"[{(_collectBeforeTrace ? "mem-gc" : "mem")}] {DateTime.Now:HH:mm:ss} heap={info.HeapSizeBytes / mb:0.0} " +
             $"g0={gens[0].SizeAfterBytes / mb:0.0} g1={gens[1].SizeAfterBytes / mb:0.0} " +
             $"g2={gens[2].SizeAfterBytes / mb:0.0} loh={gens[3].SizeAfterBytes / mb:0.0} " +
+            $"frag={info.FragmentedBytes / mb:0.0} committed={info.TotalCommittedBytes / mb:0.0} " +
             $"ws={self.WorkingSet64 / mb:0.0} priv={self.PrivateMemorySize64 / mb:0.0} " +
             $"alloc={GC.GetTotalAllocatedBytes() / mb:0} " +
             $"gc={GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)} fps={_fps:0.0}");

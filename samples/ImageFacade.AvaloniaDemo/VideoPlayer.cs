@@ -288,7 +288,8 @@ internal sealed unsafe class VideoPlayer : IDisposable
         }
         catch (Exception ex)
         {
-            Fail(ex.Message);
+            // 带上堆栈：原生调用出错时 Message 往往只有一句 "method is not supported"，看不出是哪一步
+            Fail(ex.ToString());
         }
         finally
         {
