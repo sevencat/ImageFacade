@@ -8,7 +8,10 @@ namespace ImageFacade.SimdSkia;
 /// SimdSkia 适配后端：纯托管的 SkiaSharp 兼容实现，无原生库。
 /// </summary>
 /// <remarks>
-/// <para>帧 = <see cref="SKBitmap"/>（<c>Rgba8888 + Premul</c>）+ 常驻 <see cref="SKCanvas"/>。</para>
+/// <para>
+/// 帧 = <see cref="SKBitmap"/>（<c>Rgba8888 + Premul</c>）+ 常驻 <see cref="SKCanvas"/>；
+/// 由 <see cref="TryWrapPixels"/> 接管的外部缓冲例外，是 <c>Unpremul</c> 且内存在调用方手里。
+/// </para>
 /// <para>
 /// 绑定 SimdSkia <b>0.1.12</b>：它实现的是 SkiaSharp <c>SkiaSharp</c> 命名空间的源码兼容子集，
 /// 因此这里与 <c>ImageFacade.SkiaSharp</c> 的代码基本一致，差别只在于下面这些"门面没提供"的成员
@@ -45,6 +48,9 @@ public class SimdSkiaBackend : IImageBackend
         ImageFormat.Png,
         ImageFormat.Jpeg,
         ImageFormat.WebP,
+        ImageFormat.Bmp,
+        ImageFormat.Gif,
+        ImageFormat.Ico,
     };
 
     private readonly ConcurrentDictionary<FontRef, SKTypeface> _typefaces = new();
@@ -82,11 +88,39 @@ public class SimdSkiaBackend : IImageBackend
         return frame;
     }
 
+    /// <summary>
+    /// 零拷贝接管外部 RGBA32 缓冲：用 <c>InstallPixels</c> 把指针直接装进一张
+    /// <c>Unpremul</c> 位图，不做任何像素转换。
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// 与真 SkiaSharp 不同，SimdSkia 的纯托管画布支持在<b>非预乘</b>位图上合成（实测结果与
+    /// "预乘位图 + <see cref="ImportPixels"/>" 路径逐像素一致），所以直通缓冲能原样接管。
+    /// </para>
+    /// <para>
+    /// <paramref name="ownsMemory"/> 必须为 <c>false</c>：缓冲区由谁分配我们并不知道，
+    /// 帧释放时只释放位图外壳（SimdSkia 不会碰外部内存），不负责归还缓冲。
+    /// </para>
+    /// </remarks>
     public bool TryWrapPixels(IntPtr pixels, int width, int height, int stride, bool ownsMemory, out IFrame frame)
     {
-        // Skia 绘图要求预乘；外部缓冲是直通格式，无法零拷贝接管
-        frame = null!;
-        return false;
+        if (pixels == IntPtr.Zero || ownsMemory || width <= 0 || height <= 0 || stride < (long)width * 4)
+        {
+            frame = null!;
+            return false;
+        }
+
+        var info = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Unpremul);
+        var bitmap = new SKBitmap();
+        if (!bitmap.InstallPixels(info, pixels, stride))
+        {
+            bitmap.Dispose();
+            frame = null!;
+            return false;
+        }
+
+        frame = new SimdSkiaFrame(bitmap);
+        return true;
     }
 
     public IFrame Clone(IFrame frame)
@@ -156,9 +190,22 @@ public class SimdSkiaBackend : IImageBackend
             ImageFormat.Png => SKEncodedImageFormat.Png,
             ImageFormat.Jpeg => SKEncodedImageFormat.Jpeg,
             ImageFormat.WebP => SKEncodedImageFormat.Webp,
+            ImageFormat.Bmp => SKEncodedImageFormat.Bmp,
+            ImageFormat.Gif => SKEncodedImageFormat.Gif,
+            ImageFormat.Ico => SKEncodedImageFormat.Ico,
             _ => throw new NotSupportedException($"SimdSkiaBackend 不支持编码 {request.Format}。"),
         };
 
+        // ICO 的目录项把宽高各存 1 字节（0 表示 256），超过 256 的图标写不出来，
+        // 不拦的话 SKImage.Encode 只会返回 null，错误信息落到"编码失败"上看不出原因
+        if (request.Format == ImageFormat.Ico && (source.Width > 256 || source.Height > 256))
+        {
+            throw new ImageBackendException(
+                Name,
+                $"ICO 的最大边长是 256（当前 {source.Width}x{source.Height}），请先缩放到 256 以内再编码。");
+        }
+
+        // 质量只对 JPEG / WebP 有定义，无损格式（PNG / BMP / GIF / ICO）内部会忽略这个参数
         using SKImage image = SKImage.FromBitmap(source.Bitmap);
         using SKData? encoded = image.Encode(format, Math.Clamp(request.Quality, 1, 100));
         if (encoded is null)
@@ -798,6 +845,10 @@ public class SimdSkiaBackend : IImageBackend
 }
 
 /// <summary>Skia 帧：位图 + 常驻画布。</summary>
+/// <remarks>
+/// 位图有两种来源：<see cref="SimdSkiaBackend.Create"/> 自己分配的 <c>Premul</c> 位图，和 <see cref="SimdSkiaBackend.TryWrapPixels"/>
+/// 接管外部缓冲的 <c>Unpremul</c> 位图。<see cref="SKBitmap.Dispose"/> 只释放外壳，不释放外部内存。
+/// </remarks>
 internal sealed class SimdSkiaFrame : IFrame
 {
     internal SimdSkiaFrame(SKBitmap bitmap)

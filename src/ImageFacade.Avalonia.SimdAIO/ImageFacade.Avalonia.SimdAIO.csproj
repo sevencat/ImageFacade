@@ -2,12 +2,12 @@
 
   <PropertyGroup>
     <!-- 独立版本线：后端包各自发版，不跟随核心（见 README「版本与兼容」） -->
-    <Version>0.1.0</Version>
+    <Version>0.6.0</Version>
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>ImageFacade.Avalonia.SimdAIO</AssemblyName>
     <!-- 与 ImageFacade.SimdSkia 链接同一份源码，所以类型全名也相同（两包互斥，见 README） -->
     <RootNamespace>ImageFacade.SimdSkia</RootNamespace>
-    <Description>ImageFacade 的 Avalonia.SimdAIO 后端：配合 Sevencat.Avalonia.SimdAIO 宿主使用，图像处理走纯托管的 SimdSkia 兼容门面。含 SimdSkiaBackend（编解码走 SKCodec）与 SoftwareBackend（编解码走合并程序集里的 Sdcb.SimdCodecs 聚合门面，PNG/JPEG/BMP/GIF/WebP/TIFF/ICO/QOI/PNM，无需注册）。与 ImageFacade.SimdSkia 二选一。</Description>
+    <Description>ImageFacade 的 Avalonia.SimdAIO 后端：配合 Sevencat.Avalonia.SimdAIO 宿主使用，图像处理走纯托管的 SimdSkia 兼容门面。含 SimdSkiaBackend（编解码走 SKCodec 兼容层，读写 PNG/JPEG/BMP/GIF/WebP/ICO，支持 FromPixels 的 wrap:true 零拷贝）与 SoftwareBackend（编解码走合并程序集里的 Sdcb.SimdCodecs 聚合门面，PNG/JPEG/BMP/GIF/WebP/TIFF/ICO/QOI/PNM，无需注册）。与 ImageFacade.SimdSkia 二选一。</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 

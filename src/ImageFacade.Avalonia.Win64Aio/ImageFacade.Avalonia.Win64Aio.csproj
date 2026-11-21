@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <!-- 独立版本线：后端包各自发版，不跟随核心（见 README「版本与兼容」） -->
-    <Version>0.1.0</Version>
+    <Version>0.6.0</Version>
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>ImageFacade.Avalonia.Win64Aio</AssemblyName>
     <!-- 与 ImageFacade.SkiaSharp 链接同一份源码，所以类型全名也相同（两包互斥，见 README） -->

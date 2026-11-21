@@ -425,7 +425,13 @@ public sealed class ImageEngine : IDisposable
         if (wrap && format == PixelFormat.Rgba32
             && Backend.TryWrapPixels(pixels, width, height, stride, ownsMemory: false, out IFrame wrapped))
         {
-            return new FacadeImage(this, wrapped, new ImageMetadata(ImageFormat.Unknown, width, height, 0, hasAlpha: true));
+            var image = new FacadeImage(this, wrapped, new ImageMetadata(ImageFormat.Unknown, width, height, 0, hasAlpha: true))
+            {
+                // 帧内存在调用方手里：绘制 / ImportPixels 直接落到外部缓冲上
+                IsZeroCopy = true,
+            };
+
+            return image;
         }
 
         var source = new ReadOnlySpan<byte>((void*)pixels, checked(stride * height));

@@ -99,9 +99,9 @@ av_read_frame → packet
 2. **帧池的作用是跳帧，不是攒帧**：解码比 UI 快时（直播 / 高帧率源），池里没有空闲帧就让 `RentFrame` 返回 `null`，这一帧**连 `sws_scale` 都不进**，直接丢掉——省掉缩放开销，也不会越积越多把延迟越拉越大。
 3. **画布和位图都只建一次**：分辨率变化才重建。`CopyPixelsTo` 覆盖位图的同一块内存，所以每帧没有 `new`。
 
-### 保存一帧：两条路，选一条
+### 保存一帧：三条路，选一条
 
-「保存图片」按钮保存的是**当前显示的画面**（视频 + HUD）。不能直接存帧池里那张 `FacadeImage`：UI 渲染完就把它归还了，解码线程随时会用下一帧覆盖。所以取的是已经 `CopyPixelsTo` 进 `WriteableBitmap` 的那一份，有两种存法：
+「保存图片」按钮保存的是**当前显示的画面**（视频 + HUD）。不能直接存帧池里那张 `FacadeImage`：UI 渲染完就把它归还了，解码线程随时会用下一帧覆盖。所以取的是已经 `CopyPixelsTo` 进 `WriteableBitmap` 的那一份，有三种存法（前两种要编解码，后一种不要）：
 
 **A. Sdcb 软后端（demo 里用的这条）**——把位图导回一张软后端画布再编码：
 
@@ -121,16 +121,40 @@ canvas.SavePng("frame.png");       // 直接编码，不需要中转缓冲
 
 `SoftwareBackend` 的绘制 / 像素读写由 `ImageBackendBase` 直接转给核心光栅，和 `new ImageEngine()` 是同一份实现；编解码则挂在这个后端上。所以**画布自己就能存**，不必"核心光栅画、另一个引擎存"那样搬一次像素。编码时内部只从 `PixelBufferPool`（4 MiB 上限）租一次缓冲，960×720（2.7 MB）能命中复用。
 
+**A′. 换成 SimdSkia 后端：连这一趟导入都能省**——`WriteableBitmap` 的内存本来就是 RGBA32（demo 里创建时就指定了 `Rgba8888`），
+`SimdSkiaBackend` 能直接接管它，不用先 `ImportPixels` 进画布：
+
+```csharp
+using var engine = new ImageEngine(new SimdSkiaBackend());   // PNG 编解码自带，不用 RegisterCodec
+
+using ILockedFramebuffer fb = bitmap.Lock();
+using FacadeImage frame = engine.FromPixels(
+    fb.Address, width, height, fb.RowBytes, PixelFormat.Rgba32, wrap: true);
+
+frame.SavePng("frame.png");       // 直接编码位图那块内存，一个字节都不搬
+```
+
+实测（96×64）：`IsZeroCopy == true`，编码结果与位图内存**逐字节一致**——包括半透明像素（`A=128` 原样回来，
+因为这里是直通 → 直通，没有预乘往返）。两个前提：位图必须是 RGBA 顺序（`Bgra8888` 会让 wrap 退化，只能拷贝导入）；
+`fb` 必须在 `frame.Dispose()` 之后才能解锁 / 释放，否则图还在用一块已经还回去的内存。
+
+> **原来的 `ImportPixels` 那一行不能直接改成 `wrap: true`**，原因有三条：
+> `ImportPixels` 只有 `ReadOnlySpan<byte>` 一个重载、**没有 `wrap` 参数**（span 是只读视图，语义上就不该被写）；
+> wrap 是 `FromPixels(IntPtr, ..., wrap: true)` 的参数，且只有 SimdSkia 系列后端真正支持；
+> 更要紧的是 `canvas` 是 `Create` 出来的常驻画布，**没有"外部缓冲"可接管**——它只能被写入，不能被替换成别人的内存。
+> 想省掉这一趟，就得换成 A′：用 `FromPixels(..., wrap: true)` 从位图内存直接建帧（一次性，不常驻）。
+
 **B. Avalonia 主包自带的编码器**——一个编解码包都不引：`WriteableBitmap` 已经是画好 HUD 的那一帧，直接交给 Avalonia 写盘即可（`MainWindow.SaveFrameWithAvalonia`，demo 里保留作示例、默认不调用）。
 
-| | A. Sdcb 软后端 | B. Avalonia `Bitmap.Save` |
-|---|---|---|
-| 额外依赖 | `ImageFacade.SdcbSimdCodecs` + `Sdcb.SimdCodecs.Png` | 无 |
-| 数据来源 | `WriteableBitmap` 像素（导入画布后编码） | `WriteableBitmap` 像素 |
-| 可控项 | `SaveOptions`（压缩级别 / 元数据），可换 JPEG / WebP / BMP… | 只有后端默认值 |
-| 不注册 codec 时 | `Load` / `Save` 抛 `FeatureNotSupportedException` | 照常可用 |
+| | A. Sdcb 软后端 | A′. SimdSkia `wrap: true` | B. Avalonia `Bitmap.Save` |
+|---|---|---|---|
+| 额外依赖 | `ImageFacade.SdcbSimdCodecs` + `Sdcb.SimdCodecs.Png` | `ImageFacade.SimdSkia` 或 `ImageFacade.Avalonia.SimdAIO`（二选一，编解码自带） | 无 |
+| 数据来源 | `WriteableBitmap` 像素（导入画布后编码） | `WriteableBitmap` 像素（**零拷贝**，直接编码） | `WriteableBitmap` 像素 |
+| 像素搬运 | 一次整帧导入（直通 → 预乘） | 无 | 无 |
+| 可控项 | `SaveOptions`（压缩级别 / 元数据），可换 JPEG / WebP / BMP… | 同 A（`SaveOptions`，格式取决于后端能力） | 只有后端默认值 |
+| 不注册 codec 时 | `Load` / `Save` 抛 `FeatureNotSupportedException` | 不涉及（后端自带编码） | 照常可用 |
 
-两种存法写出来的都是 960×720、含 HUD 的 PNG（同一个画面分别约 420 KB / 400 KB，压缩实现不同略有差异）。
+三种存法写出来的都是 960×720、含 HUD 的 PNG（同一个画面在 A 与 B 上分别约 420 KB / 400 KB；压缩实现不同，体积略有差异）。
 
 命令行也能直接走这条路径（窗口摆到屏幕外，不抢前台）：
 
@@ -224,19 +248,19 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 
 ## 安装
 
-七个包都已发布到 [nuget.org](https://www.nuget.org/packages/Sevencat.ImageFacade)，当前版本 `0.5.0`。
+十个包都已发布到 [nuget.org](https://www.nuget.org/packages/Sevencat.ImageFacade)，当前版本 `0.6.0`。
 
 ```xml
 <!-- 核心包永远要引，再按需加一个后端 -->
-<PackageReference Include="Sevencat.ImageFacade" Version="0.5.0" />
-<PackageReference Include="Sevencat.ImageFacade.SkiaSharp" Version="0.5.0" />
+<PackageReference Include="Sevencat.ImageFacade" Version="0.6.0" />
+<PackageReference Include="Sevencat.ImageFacade.SkiaSharp" Version="0.6.0" />
 ```
 
 后端包已带上对应三方库的依赖，不需要重复声明 `SkiaSharp` / `OpenCvSharp4` / `SixLabors.ImageSharp`。
 
 ### 版本与兼容
 
-**每个包独立发版**，不强制"七个包同进同退"（`0.5.0` 是当前七个包统一的基线，此前的软后端曾单独走 `0.1.x`）：
+**每个包独立发版**，不强制"十个包同进同退"（`0.6.0` 是当前十个包统一的基线，此前的软后端曾单独走 `0.1.x`）：
 
 | 包 | 版本线 |
 |---|---|
@@ -249,7 +273,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 2. **核心前向兼容时，后端不用重发**：核心只做"加 API / 修 bug"的兼容改动时，把它升到更高的 `X.Y.Z+n`，现有后端包照常工作；只有核心做了不兼容改动（升主版本）才需要后端重新发版对齐。
 3. **只升后端也安全**：后端只用到核心的旧 API，升级某个后端不会连累核心。
 
-各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.5.0"` 是当前统一基线的取值。
+各包的实际版本以 nuget 页面为准；本文安装示例里的 `Version="0.6.0"` 是当前统一基线的取值。
 
 | 包 | 后端类 | 三方库 | 说明 |
 |---|---|---|---|
@@ -268,7 +292,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 
 `...SimdSkia` 与 `...Avalonia.SimdAIO` 同理互斥：两包链接**同一份源码**，类型全名都是 `ImageFacade.SimdSkia.SimdSkiaBackend`，只是依赖不同——前者引 `SimdSkia`（`SkiaSharp` 命名空间门面的便利包），后者引 `Sevencat.Avalonia.SimdAIO` 宿主。`Avalonia.SimdAio.dll` 是 ilrepack 合并包，`12.1.6.2` 起**内核与 `SkiaSharp` 兼容门面（原 `SimdSkia.Compatibility`）都在里面**，所以后者不需要（也不能再）引门面包，运行时不会有第二份 `SimdSkia.*`。这个合并包自己没写任何 NuGet 依赖，但它的模块初始化器（并入的 `Avalonia.Win32` 注册 COM 代理）在程序集首次加载时就要 `MicroCom.Runtime`；由于门面也进了同一个程序集，`new SimdSkiaBackend()` 就会立刻触发它，所以本包把 `MicroCom.Runtime` 0.11.6 声明成了直接依赖，裸控制台也能直接用。
 
-这两个包里还有第二个后端 `SoftwareBackend`（继承 `SimdSkiaBackend`，绘制 / 文字 / 缩放完全一样，只换编解码）：它不走门面的 `SKCodec`，而是走 `Sdcb.SimdCodecs` 的聚合门面 `ImageCodecs`——PNG / JPEG / BMP / GIF / WebP / TIFF / ICO / QOI / PNM 都能读写，比 `SKCodec` 那条路多出 TIFF / ICO / QOI / PNM。**不需要注册**：聚合包自带全部内置编解码器，能力表在类型初始化时直接问 `ImageCodecs.IsDecodable` / `IsEncodable`，既不用像 `...SdcbSimdCodecs` 那样逐个 `RegisterCodec`，也不用操心引了哪几个格式包（`SimdSkia` 经 `SimdSkia.Imaging` 传递引用它，`...Avalonia.SimdAIO` 则是合并程序集里就含着全部 `Sdcb.SimdCodecs.*`）。两者类名相同，同时引用两个包时需要限定命名空间。
+这两个包里还有第二个后端 `SoftwareBackend`（继承 `SimdSkiaBackend`，绘制 / 文字 / 缩放完全一样，只换编解码）：它不走门面的 `SKCodec`，而是走 `Sdcb.SimdCodecs` 的聚合门面 `ImageCodecs`——PNG / JPEG / BMP / GIF / WebP / TIFF / ICO / QOI / PNM 都能读写，比 `SKCodec` 那条路多出 TIFF / QOI / PNM（`SKCodec` 兼容层读写 PNG / JPEG / BMP / GIF / WebP / ICO 六种，编码这六种也都在能力表里）。**不需要注册**：聚合包自带全部内置编解码器，能力表在类型初始化时直接问 `ImageCodecs.IsDecodable` / `IsEncodable`，既不用像 `...SdcbSimdCodecs` 那样逐个 `RegisterCodec`，也不用操心引了哪几个格式包（`SimdSkia` 经 `SimdSkia.Imaging` 传递引用它，`...Avalonia.SimdAIO` 则是合并程序集里就含着全部 `Sdcb.SimdCodecs.*`）。两者类名相同，同时引用两个包时需要限定命名空间。
 
 `...SkiaSharp` 与 `...Avalonia.Win64Aio` 也是互斥的一对：后者链接的正是前者的源码，类型全名同样是 `ImageFacade.SkiaSharp.SkiaBackend`。区别只在依赖——`Sevencat.Avalonia.Win64Aio` 这个包已经把 `Avalonia.Skia` + **真 `SkiaSharp`** + `HarfBuzzSharp` 合并进 `Avalonia.Win64Aio.dll`，原生 `libSkiaSharp.dll` / `libHarfBuzzSharp.dll` 也在包里（仅 win-x64），所以**不要再引 `SkiaSharp` 包**，否则会多出一份同名 `SK*` 类型。另外这个合并包自己没写任何 NuGet 依赖，但它的模块初始化器（`Avalonia.Win32` 注册 COM 代理）在程序集首次加载时就要 `MicroCom.Runtime`，所以本包把 `MicroCom.Runtime` 0.11.6 声明成了直接依赖——否则裸控制台里 `new SkiaBackend()` 就会抛 `TypeInitializationException`。
 
@@ -407,7 +431,7 @@ image.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);   // 写进 Ava
 | `CanDecode` / `CanEncode` | 全 `false` | 按注册 |
 | `Load` / `Save` / `Encode` | 抛 `FeatureNotSupportedException` | 已注册的格式可用 |
 
-### 逐帧刷新：复用同一张图，别每帧 `FromPixels`
+### 逐帧刷新：复用同一张图（源是 `span` 时）
 
 `FromPixels` 每次都会新建一帧并租一整幅缓冲。尺寸不变时（视频播放、摄像头、UI 自绘），建一次图、之后每帧用 `ImportPixels` 覆盖更划算：
 
@@ -430,6 +454,8 @@ void Compose(ReadOnlySpan<byte> frame, int width, int height, ILockedFramebuffer
 ```
 
 `ImportPixels` 与 `FromPixels` 的导入部分语义一致（直通 RGBA32 进、内部存预乘），省掉的只是每帧新建帧与租还缓冲；**直通 → 预乘那一次转换省不掉**。导入会作废 `HasTransparency` 的缓存结论，之后 `DetectTransparency()` 会按新像素重算。
+
+源如果是**指针**、而且本来就是 `Rgba32`，上面这套连"直通 → 预乘"也不用做——每帧 `engine.FromPixels(ptr, w, h, stride, PixelFormat.Rgba32, wrap: true)` 只装个壳（1080p 实测 0.01 ms，见 **[`wrap: true`](#wrap-true零拷贝接管外部缓冲)**），比复用画布 + `ImportPixels` 更彻底，而且是直接画进对方的缓冲。反过来，源是 `span` / `byte[]`（无法被接管）时，本文这套复用画布的做法仍是最优解。
 
 ### 画完要保存：换后端，不是给引擎加能力
 
@@ -457,6 +483,8 @@ toSave.Save("out.png");
 ```
 
 代价是两次全帧拷贝 + 两次遍历（导出一次、重建时直通→预乘一次）；偶尔保存无所谓，频繁保存请从一开始就用 `SoftwareBackend`。
+顺带一提，这条链路省不掉那一趟：`SoftwareBackend`（`ImageFacade.SdcbSimdCodecs` 的软后端）不支持接管外部缓冲，
+`wrap: true` 只在 SimdSkia 系列上生效（见 **[各后端支持情况](#wrap-true零拷贝接管外部缓冲)**）。
 
 ### 换成 Skia 也能存
 
@@ -585,25 +613,31 @@ frame.DrawDetections(onSource);
 ## 视频帧：原生内存进出
 
 ```csharp
-// 指针来自 ffmpeg 的 avFrame->data[0] 与 linesize[0]（或相机缓冲），不先转 RGBA。
+// 指针来自 ffmpeg 的 avFrame->data[0] 与 linesize[0]（或相机缓冲）。
 IntPtr pixels = frameDataPtr;
 int    stride = linesize;
 
-using var frame = engine.FromPixels(pixels, width, height, stride, PixelFormat.Bgr24);
+// 让上游直接吐 RGBA（AV_PIX_FMT_RGBA / 相机的 RGBA 模式），wrap: true 才能零拷贝接管：
+// 画 HUD 直接落在对方那块帧内存里，不进门的帧、不回写。
+// 后端不支持时自动退化成拷贝导入，代码不用改。
+using var frame = engine.FromPixels(pixels, width, height, stride, PixelFormat.Rgba32, wrap: true);
 
-frame.DrawRectangle(new RectF(100, 80, 220, 160), Rgba32.Lime, width: 2);
+frame.DrawRectangle(new RectF(100, 80, 220, 160), Rgba32.Green, width: 2);
 
-// 直接写进 Avalonia 的 WriteableBitmap 锁帧内存
+// 上屏目标若是 BGRA 位图，最后这一步转换仍要付（省掉的是"进帧"那一趟整帧拷贝）
 frame.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);
 ```
 
 `stride` 由调用方给出，按行处理、不要求连续；格式缺省是 `Rgba32`，`Bgr24` / `Bgra32` / `Rgb24` / `Gray8` 需显式指定。
+**注意 `wrap: true` 只在格式本来就是 `Rgba32` 时生效**：源是 `Bgr24` / `Bgra32`（`yuv420p` 通常先由 `sws_scale` 转成这两者）时，门面要先归一成 RGBA32，那本身就是一次拷贝，wrap 自动退化为普通导入——想真零拷贝就让 `sws_scale` 直接输出 `AV_PIX_FMT_RGBA`。
 
 > **关于通道顺序**：门面层没有"这个图是 RGB 还是 BGR"的概念，`Rgba32`、`PixelFormat.Rgba32`（默认）、`GetPixel`、`CopyPixels` 全是 RGBA 语义。后端内部怎么存是它自己的事——OpenCV 用 `CV_8UC4`（BGRA），Skia 用 `Rgba8888 Premul`，都与调用方无关。
 >
 > 唯一要显式声明顺序的地方是 `FromPixels(..., PixelFormat.Bgr24)` 这类入参：**你告诉门面源缓冲是什么格式**，它负责转换。反过来 `CopyPixels(PixelFormat.Bgr24)` 也一样。
 >
 > 代价是 OpenCV 后端不做零拷贝包装（BGRA↔RGBA 必须逐行换通道），`FromPixels` 会拷贝一次；Skia / 软后端才能直接接管外部缓冲。OpenCV 为什么必须保持 BGRA、拿 `Mat` 出去后哪些函数要自己换通道，见下文 **[OpenCV 内部是 BGRA：哪些函数转、哪些要你自己处理](#opencv-内部是-bgra哪些函数转哪些要你自己处理)**。
+>
+> 同一块缓冲还要逐帧复用（视频帧、相机预览、`WriteableBitmap` 锁帧内存）时，加 `wrap: true` 可以连这一次拷贝也省掉——语义、各后端支持情况与坑见下面的 **[`wrap: true`：零拷贝接管外部缓冲](#wrap-true零拷贝接管外部缓冲)**。
 
 ### 像素出入只有一条路
 
@@ -612,6 +646,62 @@ frame.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);
 - `FromPixels` / `CopyPixelsTo` 的尺寸、`bytesPerPixel`、`stride` 下界、缓冲区长度（`(height-1)*stride + rowBytes`，`long` 计算防溢出）全部由门面统一校验；后端 `ImportPixels` / `TryCopyPixels` 拿到的一定是"已验证过"的参数。
 - 输入不是 `Rgba32` 时，门面先用 `PixelConverter` 归一成规范 RGBA32（`stride = width * 4`），再交给后端——所以**每个后端只需要实现一种像素布局**，不用为 BGR / BGRA / Gray 各写一套分支。
 - OpenCV 后端因此只有一份 `SwapRedBlue`（RGBA32 ↔ BGRA）：通道交换是对合运算，**导出与导入共用同一份实现**，不会出现"两个方向各写一遍、只修了其中一个"的情况，也天然覆盖 `Mat.step > cols*4` 的对齐填充和外部缓冲的非紧凑 stride。
+
+### `wrap: true`：零拷贝接管外部缓冲
+
+默认的 `FromPixels(ptr, ...)` 是**导入**：把外部缓冲按 stride 搬进门面自己的帧。同一块缓冲要反复用
+（视频帧池、相机预览、Avalonia 的 `WriteableBitmap` 锁帧内存）时，这一趟整帧拷贝就是纯开销，
+`wrap: true` 让门面**直接拿外部内存当帧**：
+
+```csharp
+// 一块由 ffmpeg / 相机 / 位图锁帧给出的 RGBA32 缓冲，往里画 HUD 再上屏
+using FacadeImage frame = engine.FromPixels(pixels, width, height, stride, PixelFormat.Rgba32, wrap: true);
+
+Console.WriteLine(frame.IsZeroCopy);        // true：帧内存就是 pixels
+frame.FillRectangle(new RectF(100, 80, 220, 40), Rgba32.Green);   // 直接画进调用方的缓冲
+frame.DrawText("fps 60", new PointF(108, 88), new TextStyle { Size = 20, Color = Rgba32.White });
+
+// 不需要 CopyPixelsTo 回写——上屏那一步读的就是同一块内存
+```
+
+**语义**
+
+| 项 | 行为 |
+|---|---|
+| 触发条件 | `FromPixels(ptr, ..., wrap: true)` **且** `format` 是 `Rgba32` **且** 后端 `TryWrapPixels` 返回 `true`；任一不满足就静默退化成导入（不会抛异常，结果一样只是多一次拷贝） |
+| 命中之后 | `FacadeImage.IsZeroCopy == true`，帧与外部缓冲**同一份内存**：绘制、`ImportPixels`、`AcquirePixels` 写入都就地生效，`CopyPixelsTo` 读到的就是这块缓冲 |
+| 所有权 | 缓冲**永远归调用方**。`Dispose` 只释放包装壳（位图/画布对象），不 `free`、不归还池。正因如此 `TryWrapPixels` 的 `ownsMemory` 必须是 `false`——传 `true` 的后端实现一律返回 `false`（连"我接管所有权"的语义都没法安全承诺） |
+| 尺寸 / stride | 与导入同一套校验：`stride >= width * 4`，尾部填充字节允许存在（按行处理），`(height-1)*stride + width*4` 必须在缓冲内 |
+| 退化为导入 | 非 `Rgba32`（`Bgr24` / `Bgra32` / `Gray8`）要先归一成 RGBA32，那本身就是一次拷贝，所以 wrap 只对"源本来就是 RGBA32"有意义 |
+
+**各后端支持情况**
+
+| 后端 | `wrap: true` | 原因 |
+|---|:---:|---|
+| `SimdSkiaBackend` / `SoftwareBackend`（SimdSkia 系列） | ✓ | 纯托管画布支持在**非预乘**位图上合成，`SKBitmap.InstallPixels` 把指针直接装成 `Unpremul` 位图，一个字节都不搬 |
+| `SkiaBackend`（真 SkiaSharp） | ✗ | 原生 Skia 的绘制路径要求预乘，非预乘位图进去要么退化要么像素错，宁可拷一次 |
+| `ImageSharpBackend` | ✗ | 帧是 `Image<Rgba32>`，像素内存由 ImageSharp 持有，外部指针装不进去 |
+| `OpenCvBackend` | ✗ | 帧内部是 BGRA 的 `Mat`，与规范 RGBA32 差一个通道交换，必须逐行转 |
+| `SoftwareBackend`（`ImageFacade.SdcbSimdCodecs` 包里的软后端） | ✗ | 画布自己持有像素数组，没有"外部内存视图" |
+
+**代价对比**（1920×1080 RGBA、单核实测，单位 ms/次）
+
+| 路径 | SimdSkia | 其它后端（退化导入） |
+|---|---:|---:|
+| `FromPixels(ptr, ..., wrap: true)` | **0.01**（装壳） | 1.1–2.9（整帧拷贝） |
+| `FromPixels(ptr, ...)`（默认导入） | 12.4–14.3（含直通 → 预乘换算） | 0.8–2.8 |
+
+所以对 SimdSkia 来说 wrap 省掉的不只是 8 MB 的搬运，还有"直通 → 预乘"那一遍换算；
+**逐帧刷新同一块画布时，这是这条链路上最大的一笔开销**。
+
+**注意事项**
+
+1. **缓冲区在图存活期间不能释放、不能挪作他用**。`Dispose` 之后门面不再碰它，但反过来"缓冲先没了、图还在"是纯粹的悬空指针。用池化缓冲时，归还必须晚于 `Dispose`。
+2. **不是线程安全的**：门面自己不保证，外部再并发写这块内存更不行。跨线程交接请换引用（一帧一个 `FacadeImage`）。
+3. **换帧会把 `IsZeroCopy` 打回 `false`**：`Resize`、`Rotate`、`Crop`、`Clone` 等几何操作都是"生成新帧再替换"，替换后就与外部缓冲脱钩了。要保住零拷贝，只在当前帧上画，别做几何变换。
+4. **`Unpremul` 与内部预乘的 ±1 差异**：SimdSkia 的 wrap 帧是直通（非预乘）像素，导入帧内部是预乘。两条路画同样的东西，取回像素最多差 1（预乘往返的取整），肉眼无差别；需要逐字节等价时统一走一条路。
+5. **`FromPixels(ReadOnlySpan<byte>, ...)` 没有 wrap 参数**：span 是只读视图，语义上就不该被写。要零拷贝只能用指针重载。
+6. **自定义后端要实现 `TryWrapPixels`**：接口方法没有默认实现，模仿内置后端写 `return false` 即可（门面自动退化）。
 
 ## OpenCV 内部是 BGRA：哪些函数转、哪些要你自己处理
 
@@ -623,7 +713,7 @@ frame.CopyPixelsTo(fb.Address, fb.RowBytes, PixelFormat.Bgra32);
 
 | 后端 | 内部像素布局 | 说明 |
 |---|---|---|
-| Skia | `Rgba8888` + `Premul` | 原生 RGBA |
+| Skia | `Rgba8888` + `Premul` | 原生 RGBA（SimdSkia 由 `wrap: true` 接管的帧是 `Unpremul`，见上文） |
 | ImageSharp | `Image<Rgba32>` | 原生 RGBA |
 | 软后端 | 预乘 `Rgba32` | 原生 RGBA |
 | **OpenCV** | **`CV_8UC4` BGRA** | **唯一例外**，因为 OpenCV 编解码只认 BGR/BGRA |
@@ -707,6 +797,17 @@ using Mat copy = image.CloneMat();                           // 深拷贝，改�
 | 编码格式 | PNG/JPEG/WebP | PNG/JPEG/BMP/GIF/WebP/TIFF | PNG/JPEG/BMP/WebP | 按注册（Sdcb 格式包） |
 | NativeAOT | 已声明兼容 | 未声明 | 不支持 | 已声明兼容 |
 | 原生依赖 | SkiaSharp RID 包 | 无 | OpenCV RID 包 | 无 |
+
+> 上表的 `Skia` 列覆盖两个类：`SkiaBackend`（真 SkiaSharp，原生 `SKImage.Encode` 只认 PNG / JPEG / WebP）
+> 与 `SimdSkiaBackend`（纯托管编解码，**编码同样支持 BMP / GIF / ICO**，解码六种全支持）：
+>
+> - **BMP**：32 位；门面按"BMP 不带 alpha"处理，半透明像素编码前先合成 `SaveOptions.BackgroundColor`；
+> - **GIF**：256 色调色板 + **1 位**透明（`A == 0` 判透明，半透明会被压成不透明），要真渐变请用 PNG / WebP；
+> - **ICO**：最大边长 **256**，超出抛 `ImageBackendException`（不是静默失败）；256×256 内部按 PNG 存，小尺寸按 32 位 BMP 存。alpha 完整保留，适合做应用图标。
+>
+> `软后端` 列指 `ImageFacade.SdcbSimdCodecs` 里那个不带内置编解码的软后端，能力表跟着注册的格式包走，
+> 所以"按注册（Sdcb 格式包）"那一格取决于你 `RegisterCodec` 了哪些格式；
+> SimdSkia 包里的 `SoftwareBackend` 自带 `Sdcb.SimdCodecs` 聚合门面（PNG/JPEG/BMP/GIF/WebP/TIFF/ICO/QOI/PNM），不需要注册。
 
 OpenCV 的 drawing 函数是**覆盖写像素**，没有混合模式——所以半透明绘制不能直接交给 `Fill/Draw/Line`。后端的做法是先把形状画到一块**和形状包围盒一样大的 8 位全 0 层**上（AA 边缘自然留下 0~255 的覆盖率），再按覆盖率把颜色逐像素混进目标；不透明形状仍直接画，不多付一分钱。这条路径和半透明文字共用同一套混合公式，所以四个后端的观感一致。代价是每个半透明形状一块包围盒大小的单通道缓冲，不是全图临时层。
 

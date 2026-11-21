@@ -2,12 +2,12 @@
 
   <PropertyGroup>
     <!-- 独立版本线：后端包各自发版，不跟随核心（见 README「版本与兼容」） -->
-    <Version>0.1.0</Version>
+    <Version>0.6.0</Version>
     <!-- SimdSkia 只有 net10.0 目标，本适配无法像 SkiaSharp 适配那样同时给 net8.0 -->
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>ImageFacade.SimdSkia</AssemblyName>
     <RootNamespace>ImageFacade.SimdSkia</RootNamespace>
-    <Description>ImageFacade 的 SimdSkia 后端：纯托管的 SkiaSharp 兼容实现，不依赖 SkiaSharp / HarfBuzz 原生库，适合 AOT 与零原生依赖部署。内含两个后端：SimdSkiaBackend（编解码走 SKCodec）与 SoftwareBackend（编解码走 Sdcb.SimdCodecs 聚合门面，PNG/JPEG/BMP/GIF/WebP/TIFF/ICO/QOI/PNM，无需注册）。</Description>
+    <Description>ImageFacade 的 SimdSkia 后端：纯托管的 SkiaSharp 兼容实现，不依赖 SkiaSharp / HarfBuzz 原生库，适合 AOT 与零原生依赖部署。内含两个后端：SimdSkiaBackend（编解码走 SKCodec 兼容层，读写 PNG/JPEG/BMP/GIF/WebP/ICO，支持 FromPixels 的 wrap:true 零拷贝）与 SoftwareBackend（编解码走 Sdcb.SimdCodecs 聚合门面，PNG/JPEG/BMP/GIF/WebP/TIFF/ICO/QOI/PNM，无需注册）。</Description>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
@@ -17,6 +17,9 @@
 
   <ItemGroup>
     <PackageReference Include="SimdSkia" />
+    <!-- SoftwareBackend 直接对着聚合门面 ImageCodecs 编译：SimdSkia.Imaging 本来就传递引用了它，
+         这里显式声明一份，免得上游哪天改成 PrivateAssets 就把我们编译打断。 -->
+    <PackageReference Include="Sdcb.SimdCodecs" />
   </ItemGroup>
 
 </Project>
