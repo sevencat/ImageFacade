@@ -14,6 +14,17 @@
          4.x 保留了 3.x 的全部 API（SKPath 的写 API 与 4 参 DrawBitmap 只是标记过时，未删除），
          所以用 3.x 编译的包在使用方把 SkiaSharp 提升到 4.x 时仍能运行；反过来不成立。 -->
     <PackageVersion Include="SkiaSharp" Version="3.119.1" />
+    <!-- SimdSkia：纯托管的 SkiaSharp 兼容实现（SkiaSharp 命名空间门面 + CPU 光栅 + 托管编解码），
+         只有 net10.0 目标，所以 ImageFacade.SimdSkia 也只能钉 net10.0。 -->
+    <PackageVersion Include="SimdSkia" Version="0.1.12" />
+    <!-- 合并了 SimdSkia + Avalonia 的宿主包（替代 Avalonia.Skia / Avalonia.Win32），仅 net10.0、仅 win-x64。
+         12.1.6.2 起 SkiaSharp 兼容门面（原 SimdSkia.Compatibility 的内容）也合并进 Avalonia.SimdAio.dll，
+         所以不再需要单独引门面包。 -->
+    <PackageVersion Include="Sevencat.Avalonia.SimdAIO" Version="12.1.6.2" />
+    <!-- 同一个作者的另一条线：Avalonia + **真 SkiaSharp**（含原生 libSkiaSharp/libHarfBuzzSharp）的合并包 -->
+    <PackageVersion Include="Sevencat.Avalonia.Win64Aio" Version="12.1.6" />
+    <!-- 已并入 Avalonia.Win64Aio.dll 的 Avalonia.Win32 需要它做 COM 代理注册（版本对齐 Avalonia 12.1.6） -->
+    <PackageVersion Include="MicroCom.Runtime" Version="0.11.6" />
     <!-- 原生资产按 RID 引用：适配包不引，由应用/测试决定；版本必须与托管包一致 -->
     <PackageVersion Include="SkiaSharp.NativeAssets.Win32" Version="3.119.1" />
     <PackageVersion Include="OpenCvSharp4" Version="4.13.0.20261107" />

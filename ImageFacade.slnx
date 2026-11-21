@@ -3,6 +3,9 @@
     <Project Path="src/ImageFacade/ImageFacade.csproj" />
     <Project Path="src/ImageFacade.SdcbSimdCodecs/ImageFacade.SdcbSimdCodecs.csproj" />
     <Project Path="src/ImageFacade.SkiaSharp/ImageFacade.SkiaSharp.csproj" />
+    <Project Path="src/ImageFacade.SimdSkia/ImageFacade.SimdSkia.csproj" />
+    <Project Path="src/ImageFacade.Avalonia.SimdAIO/ImageFacade.Avalonia.SimdAIO.csproj" />
+    <Project Path="src/ImageFacade.Avalonia.Win64Aio/ImageFacade.Avalonia.Win64Aio.csproj" />
     <Project Path="src/ImageFacade.OpenCvSharp/ImageFacade.OpenCvSharp.csproj" />
     <Project Path="src/ImageFacade.OpenCvSharp5/ImageFacade.OpenCvSharp5.csproj" />
     <Project Path="src/ImageFacade.ImageSharp/ImageFacade.ImageSharp.csproj" />

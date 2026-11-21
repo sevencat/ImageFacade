@@ -17,6 +17,9 @@
   <a href="https://www.nuget.org/packages/Sevencat.ImageFacade">Sevencat.ImageFacade</a> ·
   <a href="https://www.nuget.org/packages/Sevencat.ImageFacade.SdcbSimdCodecs">SdcbSimdCodecs</a> ·
   <a href="https://www.nuget.org/packages/Sevencat.ImageFacade.SkiaSharp">SkiaSharp</a> ·
+  <a href="https://www.nuget.org/packages/Sevencat.ImageFacade.SimdSkia">SimdSkia</a> ·
+  <a href="https://www.nuget.org/packages/Sevencat.ImageFacade.Avalonia.SimdAIO">Avalonia.SimdAIO</a> ·
+  <a href="https://www.nuget.org/packages/Sevencat.ImageFacade.Avalonia.Win64Aio">Avalonia.Win64Aio</a> ·
   <a href="https://www.nuget.org/packages/Sevencat.ImageFacade.ImageSharp">ImageSharp</a> ·
   <a href="https://www.nuget.org/packages/Sevencat.ImageFacade.ImageSharp2">ImageSharp2</a> ·
   <a href="https://www.nuget.org/packages/Sevencat.ImageFacade.OpenCvSharp">OpenCvSharp</a> ·
@@ -238,7 +241,7 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 | 包 | 版本线 |
 |---|---|
 | `Sevencat.ImageFacade`（核心） | 独立；**patch / minor 只做加法**，不破坏已发布的公开 API |
-| 各后端（SkiaSharp / ImageSharp / ImageSharp2 / OpenCvSharp / OpenCvSharp5 / SdcbSimdCodecs） | 各自独立，可以只升其中一个 |
+| 各后端（SkiaSharp / SimdSkia / Avalonia.SimdAIO / Avalonia.Win64Aio / ImageSharp / ImageSharp2 / OpenCvSharp / OpenCvSharp5 / SdcbSimdCodecs） | 各自独立，可以只升其中一个 |
 
 三条约定：
 
@@ -253,12 +256,21 @@ ImageFacade 把这层差异收在 `IImageBackend` 后面：
 | [`Sevencat.ImageFacade`](https://www.nuget.org/packages/Sevencat.ImageFacade) | — | 无 | 核心：契约 + 路由 + 排版 + 内置字体 + Pipeline |
 | [`Sevencat.ImageFacade.SdcbSimdCodecs`](https://www.nuget.org/packages/Sevencat.ImageFacade.SdcbSimdCodecs) | `SoftwareBackend` | `Sdcb.SimdCodecs.Abstractions` 2.0 | 纯托管，无原生依赖，**仅 `net10.0`**；编解码按需接入，见下 |
 | [`Sevencat.ImageFacade.SkiaSharp`](https://www.nuget.org/packages/Sevencat.ImageFacade.SkiaSharp) | `SkiaBackend` | `SkiaSharp` 3.119.1 | 编译目标 3.x，**可提升到 4.x**（4.x 兼容 3.x） |
+| [`Sevencat.ImageFacade.SimdSkia`](https://www.nuget.org/packages/Sevencat.ImageFacade.SimdSkia) | `SimdSkiaBackend` / `SoftwareBackend` | `SimdSkia` 0.1.12 | 纯托管的 SkiaSharp **源码兼容**子集，无原生库，**仅 `net10.0`**；与真 SkiaSharp 程序集不能共存 |
+| [`Sevencat.ImageFacade.Avalonia.SimdAIO`](https://www.nuget.org/packages/Sevencat.ImageFacade.Avalonia.SimdAIO) | `SimdSkiaBackend` / `SoftwareBackend` | `Sevencat.Avalonia.SimdAIO` 12.1.6.2（内含 SimdSkia 内核 + `SkiaSharp` 兼容门面） | 给 Avalonia + SimdAIO 宿主的同一份后端；**仅 `net10.0`**，与上一行的包二选一 |
+| [`Sevencat.ImageFacade.Avalonia.Win64Aio`](https://www.nuget.org/packages/Sevencat.ImageFacade.Avalonia.Win64Aio) | `SkiaBackend` | `Sevencat.Avalonia.Win64Aio` 12.1.6（内含真 `SkiaSharp` + `libSkiaSharp.dll`） | 与 `...SkiaSharp` 同一份源码、同一个后端类；**仅 `net10.0` + win-x64**，两者二选一 |
 | [`Sevencat.ImageFacade.ImageSharp`](https://www.nuget.org/packages/Sevencat.ImageFacade.ImageSharp) | `ImageSharpBackend` | `ImageSharp` 3.1 | 纯托管，格式最全 |
 | [`Sevencat.ImageFacade.ImageSharp2`](https://www.nuget.org/packages/Sevencat.ImageFacade.ImageSharp2) | `ImageSharpBackend` | `ImageSharp` 2.1 | 同上，2.x 分支 |
 | [`Sevencat.ImageFacade.OpenCvSharp`](https://www.nuget.org/packages/Sevencat.ImageFacade.OpenCvSharp) | `OpenCvBackend` | `OpenCvSharp4` 4.13 | 内部 BGRA，API 层统一 RGBA |
 | [`Sevencat.ImageFacade.OpenCvSharp5`](https://www.nuget.org/packages/Sevencat.ImageFacade.OpenCvSharp5) | `OpenCvBackend` | `OpenCvSharp5` 5.0 | 同上，5.x 分支 |
 
 无后缀 = 当前主版本；带数字 = 指定的另一主版本。**同一进程只能绑定一个三方库主版本**，所以 `Sevencat.ImageFacade.ImageSharp` / `...ImageSharp2` 只能二选一。
+
+`...SimdSkia` 与 `...Avalonia.SimdAIO` 同理互斥：两包链接**同一份源码**，类型全名都是 `ImageFacade.SimdSkia.SimdSkiaBackend`，只是依赖不同——前者引 `SimdSkia`（`SkiaSharp` 命名空间门面的便利包），后者引 `Sevencat.Avalonia.SimdAIO` 宿主。`Avalonia.SimdAio.dll` 是 ilrepack 合并包，`12.1.6.2` 起**内核与 `SkiaSharp` 兼容门面（原 `SimdSkia.Compatibility`）都在里面**，所以后者不需要（也不能再）引门面包，运行时不会有第二份 `SimdSkia.*`。这个合并包自己没写任何 NuGet 依赖，但它的模块初始化器（并入的 `Avalonia.Win32` 注册 COM 代理）在程序集首次加载时就要 `MicroCom.Runtime`；由于门面也进了同一个程序集，`new SimdSkiaBackend()` 就会立刻触发它，所以本包把 `MicroCom.Runtime` 0.11.6 声明成了直接依赖，裸控制台也能直接用。
+
+这两个包里还有第二个后端 `SoftwareBackend`（继承 `SimdSkiaBackend`，绘制 / 文字 / 缩放完全一样，只换编解码）：它不走门面的 `SKCodec`，而是走 `Sdcb.SimdCodecs` 的聚合门面 `ImageCodecs`——PNG / JPEG / BMP / GIF / WebP / TIFF / ICO / QOI / PNM 都能读写，比 `SKCodec` 那条路多出 TIFF / ICO / QOI / PNM。**不需要注册**：聚合包自带全部内置编解码器，能力表在类型初始化时直接问 `ImageCodecs.IsDecodable` / `IsEncodable`，既不用像 `...SdcbSimdCodecs` 那样逐个 `RegisterCodec`，也不用操心引了哪几个格式包（`SimdSkia` 经 `SimdSkia.Imaging` 传递引用它，`...Avalonia.SimdAIO` 则是合并程序集里就含着全部 `Sdcb.SimdCodecs.*`）。两者类名相同，同时引用两个包时需要限定命名空间。
+
+`...SkiaSharp` 与 `...Avalonia.Win64Aio` 也是互斥的一对：后者链接的正是前者的源码，类型全名同样是 `ImageFacade.SkiaSharp.SkiaBackend`。区别只在依赖——`Sevencat.Avalonia.Win64Aio` 这个包已经把 `Avalonia.Skia` + **真 `SkiaSharp`** + `HarfBuzzSharp` 合并进 `Avalonia.Win64Aio.dll`，原生 `libSkiaSharp.dll` / `libHarfBuzzSharp.dll` 也在包里（仅 win-x64），所以**不要再引 `SkiaSharp` 包**，否则会多出一份同名 `SK*` 类型。另外这个合并包自己没写任何 NuGet 依赖，但它的模块初始化器（`Avalonia.Win32` 注册 COM 代理）在程序集首次加载时就要 `MicroCom.Runtime`，所以本包把 `MicroCom.Runtime` 0.11.6 声明成了直接依赖——否则裸控制台里 `new SkiaBackend()` 就会抛 `TypeInitializationException`。
 
 原生库按 RID 由应用侧引用，适配包不钉死 RID：
 
@@ -878,6 +890,9 @@ src/
   ImageFacade/                     # 核心：契约 + 路由 + 排版 + 内置字体 + Pipeline
   ImageFacade.SdcbSimdCodecs/      # 软后端：ImgProcSharp 渲染层 + 可插拔编解码（只引 Abstractions）
   ImageFacade.SkiaSharp/           # SkiaSharp 3.119（编译目标，兼容 4.x）
+  ImageFacade.SimdSkia/            # SimdSkia 0.1.12（纯托管 SkiaSharp 兼容子集，无原生库）+ SoftwareBackend
+  ImageFacade.Avalonia.SimdAIO/    # 链接上一份源码：Avalonia.SimdAIO 宿主（内核 + SkiaSharp 门面都在合并包里）
+  ImageFacade.Avalonia.Win64Aio/   # 链接 ImageFacade.SkiaSharp 源码：Avalonia 宿主已合并真 SkiaSharp
   ImageFacade.ImageSharp/          # ImageSharp 3.x + Drawing 2.x
   ImageFacade.ImageSharp2/         # ImageSharp 2.x + Drawing 1.x（链接上一份源码）
   ImageFacade.OpenCvSharp/         # OpenCvSharp4

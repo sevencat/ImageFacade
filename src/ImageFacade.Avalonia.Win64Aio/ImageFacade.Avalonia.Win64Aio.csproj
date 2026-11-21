@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 独立版本线：后端包各自发版，不跟随核心（见 README「版本与兼容」） -->
+    <Version>0.1.0</Version>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ImageFacade.Avalonia.Win64Aio</AssemblyName>
+    <!-- 与 ImageFacade.SkiaSharp 链接同一份源码，所以类型全名也相同（两包互斥，见 README） -->
+    <RootNamespace>ImageFacade.SkiaSharp</RootNamespace>
+    <Description>ImageFacade 的 Avalonia.Win64Aio 后端：Avalonia 宿主已经合并了真 SkiaSharp（含原生 libSkiaSharp），这里直接复用同一份 SkiaSharp 适配代码。与 ImageFacade.SkiaSharp 二选一。</Description>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 宿主包：Avalonia.Win64Aio.dll 已把 Avalonia.Skia + SkiaSharp + HarfBuzzSharp 合并进来，
+         原生 libSkiaSharp / libHarfBuzzSharp 也在包里的 runtimes/win-x64/native。
+         所以这里 **不能** 再引 SkiaSharp 包，否则会出现两份同名 SK* 类型。 -->
+    <PackageReference Include="Sevencat.Avalonia.Win64Aio" />
+    <!-- 合并包自己没声明任何依赖，但 Avalonia.Win64Aio.dll 的模块初始化器（Avalonia.Win32 的 COM
+         代理注册）在程序集首次加载时就要 MicroCom.Runtime；缺了它连 new SkiaBackend() 都会抛
+         TypeInitializationException。Avalonia 12.1.6 依赖的正是这个版本。 -->
+    <PackageReference Include="MicroCom.Runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 源码只有一份：放在 ImageFacade.SkiaSharp 工程下，本工程链接编译 -->
+    <Compile Include="..\ImageFacade.SkiaSharp\**\*.cs"
+             Exclude="..\ImageFacade.SkiaSharp\bin\**;..\ImageFacade.SkiaSharp\obj\**"
+             Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- 独立版本线：后端包各自发版，不跟随核心（见 README「版本与兼容」） -->
+    <Version>0.1.0</Version>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>ImageFacade.Avalonia.SimdAIO</AssemblyName>
+    <!-- 与 ImageFacade.SimdSkia 链接同一份源码，所以类型全名也相同（两包互斥，见 README） -->
+    <RootNamespace>ImageFacade.SimdSkia</RootNamespace>
+    <Description>ImageFacade 的 Avalonia.SimdAIO 后端：配合 Sevencat.Avalonia.SimdAIO 宿主使用，图像处理走纯托管的 SimdSkia 兼容门面。含 SimdSkiaBackend（编解码走 SKCodec）与 SoftwareBackend（编解码走合并程序集里的 Sdcb.SimdCodecs 聚合门面，PNG/JPEG/BMP/GIF/WebP/TIFF/ICO/QOI/PNM，无需注册）。与 ImageFacade.SimdSkia 二选一。</Description>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ImageFacade\ImageFacade.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 宿主包：Avalonia + SimdSkia 的 ilrepack 合并程序集（Avalonia.SimdAio.dll）。
+         从 12.1.6.2 起，SkiaSharp 兼容门面（SimdSkia.Compatibility）也一起合并进去了，
+         所以本后端的绘制 / 文本 / 编解码代码不用再单独引门面包 -->
+    <PackageReference Include="Sevencat.Avalonia.SimdAIO" />
+    <!-- 合并包自己没声明任何依赖，但它的模块初始化器（并入的 Avalonia.Win32 注册 COM 代理）
+         在程序集首次加载时就要 MicroCom.Runtime。12.1.6.2 起 SkiaSharp 门面也进了这个程序集，
+         所以连 new SimdSkiaBackend() 都会立刻触发它；裸控制台里不补这一条就抛
+         TypeInitializationException。版本对齐 Avalonia 12.1.6 依赖的 0.11.6。 -->
+    <PackageReference Include="MicroCom.Runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 源码只有一份：放在 ImageFacade.SimdSkia 工程下，本工程链接编译 -->
+    <Compile Include="..\ImageFacade.SimdSkia\**\*.cs"
+             Exclude="..\ImageFacade.SimdSkia\bin\**;..\ImageFacade.SimdSkia\obj\**"
+             Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

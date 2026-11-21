@@ -16,14 +16,12 @@ namespace ImageFacade;
 public sealed class FacadeImage : IDisposable
 {
     private readonly ImageEngine _engine;
-    private IImageBackend _backend;
     private IFrame? _frame;
     private ImageMetadata _metadata;
 
-    internal FacadeImage(ImageEngine engine, IImageBackend backend, IFrame frame, ImageMetadata metadata)
+    internal FacadeImage(ImageEngine engine, IFrame frame, ImageMetadata metadata)
     {
         _engine = engine;
-        _backend = backend;
         _frame = frame;
         _metadata = metadata;
     }
@@ -36,7 +34,7 @@ public sealed class FacadeImage : IDisposable
 
     public ImageFormat SourceFormat => _metadata.Format;
 
-    public string BackendName => _backend.Name;
+    public string BackendName => Backend.Name;
 
     public ImageMetadata Metadata => _metadata;
 
@@ -45,7 +43,7 @@ public sealed class FacadeImage : IDisposable
 
     internal IFrame Frame => _frame ?? throw new ObjectDisposedException(nameof(FacadeImage));
 
-    internal IImageBackend Backend => _backend;
+    internal IImageBackend Backend => _engine.Backend;
 
     /// <summary>Pipeline（letterbox / 张量化）需要借同一个引擎造临时图。</summary>
     internal ImageEngine Engine => _engine;
@@ -90,9 +88,9 @@ public sealed class FacadeImage : IDisposable
             IFrame scaledFrame = ResizeFrame(plan.ScaledWidth, plan.ScaledHeight, options.Sampler);
             try
             {
-                if (!_backend.TryCopyPixels(scaledFrame, scaled.AsSpan(0, scaledStride * plan.ScaledHeight), scaledStride))
+                if (!Backend.TryCopyPixels(scaledFrame, scaled.AsSpan(0, scaledStride * plan.ScaledHeight), scaledStride))
                 {
-                    throw new FeatureNotSupportedException(nameof(CopyPixels), _backend.Name);
+                    throw new FeatureNotSupportedException(nameof(CopyPixels), Backend.Name);
                 }
             }
             finally
@@ -114,10 +112,10 @@ public sealed class FacadeImage : IDisposable
                 plan.PlaceX,
                 plan.PlaceY);
 
-            IFrame frame = _backend.Create(plan.OutputWidth, plan.OutputHeight, background: null);
+            IFrame frame = Backend.Create(plan.OutputWidth, plan.OutputHeight, background: null);
             try
             {
-                _backend.ImportPixels(frame, outputSpan, outputStride);
+                Backend.ImportPixels(frame, outputSpan, outputStride);
             }
             catch
             {
@@ -154,7 +152,7 @@ public sealed class FacadeImage : IDisposable
     public FacadeImage Clear(Rgba32 color)
     {
         ThrowIfDisposed();
-        _backend.Clear(Frame, color);
+        Backend.Clear(Frame, color);
 
         // 整张图都是同一个颜色：alpha 结论由这个颜色直接决定，不用扫
         _metadata = _metadata.WithHasTransparency(color.A < 255);
@@ -244,7 +242,7 @@ public sealed class FacadeImage : IDisposable
         catch (FeatureNotSupportedException)
         {
             // 排版需要测量，但用户调用的是 DrawText：错误信息应该指向 DrawText
-            throw new FeatureNotSupportedException(nameof(DrawText), _backend.Name);
+            throw new FeatureNotSupportedException(nameof(DrawText), Backend.Name);
         }
 
         foreach (TextLine line in layout.Lines)
@@ -299,8 +297,8 @@ public sealed class FacadeImage : IDisposable
     public FacadeImage Clone()
     {
         ThrowIfDisposed();
-        IFrame copy = _backend.Clone(Frame);
-        return new FacadeImage(_engine, _backend, copy, _metadata);
+        IFrame copy = Backend.Clone(Frame);
+        return new FacadeImage(_engine, copy, _metadata);
     }
 
     /// <summary>
@@ -429,7 +427,7 @@ public sealed class FacadeImage : IDisposable
         ValidateSaveOptions(save);
         EnsureCanEncode(format);
 
-        if (_backend is IAsyncImageBackend asyncBackend)
+        if (Backend is IAsyncImageBackend asyncBackend)
         {
             var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata, AssumeOpaque);
             EncodableFrame encodable = PrepareForEncode(save, format);
@@ -460,7 +458,7 @@ public sealed class FacadeImage : IDisposable
         ValidateSaveOptions(save);
         EnsureCanEncode(format);
 
-        if (_backend is IAsyncImageBackend asyncBackend)
+        if (Backend is IAsyncImageBackend asyncBackend)
         {
             using var buffer = new MemoryStream();
             var request = new EncodeRequest(format, save.Quality, save.CompressionLevel, save.PreserveMetadata, AssumeOpaque);
@@ -512,9 +510,9 @@ public sealed class FacadeImage : IDisposable
     /// </summary>
     private void EnsureCanEncode(ImageFormat format)
     {
-        if (!_backend.SupportedEncodeFormats.Contains(format))
+        if (!Backend.SupportedEncodeFormats.Contains(format))
         {
-            throw new FeatureNotSupportedException("Encode", _backend.Name);
+            throw new FeatureNotSupportedException("Encode", Backend.Name);
         }
     }
 
@@ -542,7 +540,7 @@ public sealed class FacadeImage : IDisposable
     {
         ThrowIfDisposed();
         ImageEngine.ValidatePixelBuffer(pixels, Width, Height, stride, format);
-        ImageEngine.ImportInto(_backend, Frame, pixels, Width, Height, stride, format);
+        ImageEngine.ImportInto(Backend, Frame, pixels, Width, Height, stride, format);
 
         // 上一帧的 alpha 结论对新像素不成立（可能从不透明变成有半透明，也可能反过来）
         _metadata = _metadata.WithHasTransparency(null);
@@ -562,9 +560,9 @@ public sealed class FacadeImage : IDisposable
             throw new ArgumentOutOfRangeException(nameof(y), y, $"y 必须在 0..{Height - 1}。");
         }
 
-        return _backend.TryGetPixel(Frame, x, y, out Rgba32 color)
+        return Backend.TryGetPixel(Frame, x, y, out Rgba32 color)
             ? color
-            : throw new FeatureNotSupportedException(nameof(GetPixel), _backend.Name);
+            : throw new FeatureNotSupportedException(nameof(GetPixel), Backend.Name);
     }
 
     public void CopyPixelsTo(Span<byte> destination, int destinationStride, PixelFormat format = PixelFormat.Rgba32)
@@ -586,9 +584,9 @@ public sealed class FacadeImage : IDisposable
 
         if (format == PixelFormat.Rgba32)
         {
-            if (!_backend.TryCopyPixels(Frame, destination, destinationStride))
+            if (!Backend.TryCopyPixels(Frame, destination, destinationStride))
             {
-                throw new FeatureNotSupportedException(nameof(CopyPixelsTo), _backend.Name);
+                throw new FeatureNotSupportedException(nameof(CopyPixelsTo), Backend.Name);
             }
 
             return;
@@ -599,9 +597,9 @@ public sealed class FacadeImage : IDisposable
         try
         {
             Span<byte> canonical = rented.AsSpan(0, canonicalStride * Height);
-            if (!_backend.TryCopyPixels(Frame, canonical, canonicalStride))
+            if (!Backend.TryCopyPixels(Frame, canonical, canonicalStride))
             {
-                throw new FeatureNotSupportedException(nameof(CopyPixelsTo), _backend.Name);
+                throw new FeatureNotSupportedException(nameof(CopyPixelsTo), Backend.Name);
             }
 
             PixelConverter.Convert(canonical, canonicalStride, PixelFormat.Rgba32, destination, destinationStride, format, Width, Height);
@@ -639,9 +637,9 @@ public sealed class FacadeImage : IDisposable
     public PixelLease AcquirePixels()
     {
         ThrowIfDisposed();
-        return _backend.TryAcquirePixels(Frame, out PixelLease lease)
+        return Backend.TryAcquirePixels(Frame, out PixelLease lease)
             ? lease
-            : throw new FeatureNotSupportedException(nameof(AcquirePixels), _backend.Name);
+            : throw new FeatureNotSupportedException(nameof(AcquirePixels), Backend.Name);
     }
 
     /// <summary>
@@ -670,7 +668,7 @@ public sealed class FacadeImage : IDisposable
             return known;
         }
 
-        bool? detected = AlphaProbe.TryDetect(_backend, Frame);
+        bool? detected = AlphaProbe.TryDetect(Backend, Frame);
         if (detected is bool value)
         {
             _metadata = _metadata.WithHasTransparency(value);
@@ -689,9 +687,9 @@ public sealed class FacadeImage : IDisposable
     {
         ThrowIfDisposed();
 
-        if (!operation(_backend, Frame, in spec))
+        if (!operation(Backend, Frame, in spec))
         {
-            throw new FeatureNotSupportedException(feature, _backend.Name);
+            throw new FeatureNotSupportedException(feature, Backend.Name);
         }
 
         // 画上去的东西可能带半透明颜色或抗锯齿边：旧的"全不透明"结论立刻作废。
@@ -703,9 +701,9 @@ public sealed class FacadeImage : IDisposable
     /// <summary>折线 / 多边形用：<see cref="PolylineSpec"/> 是 ref struct，不能当泛型实参，所以单独走一条路径。</summary>
     private FacadeImage ExecutePoints(string feature, ReadOnlySpan<PointF> points, Rgba32 color, float width, bool closed, StrokeStyle? style, bool filled)
     {
-        if (!TryPointOperation(_backend, Frame, points, color, width, closed, style, filled))
+        if (!TryPointOperation(Backend, Frame, points, color, width, closed, style, filled))
         {
-            throw new FeatureNotSupportedException(feature, _backend.Name);
+            throw new FeatureNotSupportedException(feature, Backend.Name);
         }
 
         _metadata = _metadata.WithHasTransparency(null);   // 同 Execute：绘制会让 alpha 结论过期
@@ -758,13 +756,13 @@ public sealed class FacadeImage : IDisposable
     {
         if (width == Width && height == Height)
         {
-            return _backend.Clone(Frame);
+            return Backend.Clone(Frame);
         }
 
         var request = new ResizeRequest(width, height, sampler);
-        if (!_backend.TryResize(Frame, in request, out IFrame resized))
+        if (!Backend.TryResize(Frame, in request, out IFrame resized))
         {
-            throw new FeatureNotSupportedException(nameof(Resize), _backend.Name);
+            throw new FeatureNotSupportedException(nameof(Resize), Backend.Name);
         }
 
         return resized;
@@ -779,9 +777,9 @@ public sealed class FacadeImage : IDisposable
     /// </summary>
     internal TextMetrics MeasureSingleLine(ReadOnlySpan<char> text, TextStyle style)
     {
-        if (!_backend.TryMeasureText(Frame, text, in style, out TextMetrics metrics))
+        if (!Backend.TryMeasureText(Frame, text, in style, out TextMetrics metrics))
         {
-            throw new FeatureNotSupportedException(nameof(MeasureText), _backend.Name);
+            throw new FeatureNotSupportedException(nameof(MeasureText), Backend.Name);
         }
 
         return metrics;
@@ -798,7 +796,7 @@ public sealed class FacadeImage : IDisposable
         {
             try
             {
-                _backend.Encode(encodable.Frame, stream, in request);
+                Backend.Encode(encodable.Frame, stream, in request);
             }
             catch (FeatureNotSupportedException)
             {
@@ -807,11 +805,11 @@ public sealed class FacadeImage : IDisposable
             catch (NotSupportedException ex)
             {
                 // 后端因运行时条件（编码器缺失、参数不支持）拒绝：同样归为能力异常
-                throw new FeatureNotSupportedException("Encode", _backend.Name, ex);
+                throw new FeatureNotSupportedException("Encode", Backend.Name, ex);
             }
             catch (Exception ex) when (ex is not ImageBackendException)
             {
-                throw new ImageBackendException(_backend.Name, $"编码为 {format} 失败。", ex);
+                throw new ImageBackendException(Backend.Name, $"编码为 {format} 失败。", ex);
             }
         }
         finally
@@ -845,9 +843,9 @@ public sealed class FacadeImage : IDisposable
         try
         {
             Span<byte> canonical = rented.AsSpan(0, length);
-            if (!_backend.TryCopyPixels(Frame, canonical, stride))
+            if (!Backend.TryCopyPixels(Frame, canonical, stride))
             {
-                throw new FeatureNotSupportedException(nameof(CopyPixels), _backend.Name);
+                throw new FeatureNotSupportedException(nameof(CopyPixels), Backend.Name);
             }
 
             if (!CompositeOverBackground(rented, stride, save.BackgroundColor))
@@ -855,8 +853,8 @@ public sealed class FacadeImage : IDisposable
                 return new EncodableFrame(Frame, null);
             }
 
-            frame = _backend.Create(Width, Height, background: null);
-            _backend.ImportPixels(frame, canonical, stride);
+            frame = Backend.Create(Width, Height, background: null);
+            Backend.ImportPixels(frame, canonical, stride);
             return new EncodableFrame(frame, frame);
         }
         catch

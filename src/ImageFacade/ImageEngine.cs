@@ -145,7 +145,7 @@ public sealed class ImageEngine : IDisposable
 
         // 第二道闸：嗅探不认识的格式（或头部与实际不符）在这里兜底，超限的帧就地释放
         EnsureWithinLimit(frame, load.MaxPixels);
-        return FinishLoad(new FacadeImage(this, Backend, frame, metadata), load);
+        return FinishLoad(new FacadeImage(this, frame, metadata), load);
     }
 
     /// <summary>
@@ -282,7 +282,7 @@ public sealed class ImageEngine : IDisposable
         }
 
         EnsureWithinLimit(decoded.Frame, load.MaxPixels);
-        return FinishLoad(new FacadeImage(this, Backend, decoded.Frame, decoded.Metadata), load);
+        return FinishLoad(new FacadeImage(this, decoded.Frame, decoded.Metadata), load);
 
         DecodedImage DecodeLocally()
         {
@@ -310,7 +310,7 @@ public sealed class ImageEngine : IDisposable
             hasAlpha: translucent,
             hasTransparency: translucent);
 
-        return new FacadeImage(this, Backend, frame, metadata);
+        return new FacadeImage(this, frame, metadata);
     }
 
     public FacadeImage FromPixels(
@@ -335,7 +335,7 @@ public sealed class ImageEngine : IDisposable
             throw;
         }
 
-        return new FacadeImage(this, Backend, frame, new ImageMetadata(ImageFormat.Unknown, width, height, 0, hasAlpha: true));
+        return new FacadeImage(this, frame, new ImageMetadata(ImageFormat.Unknown, width, height, 0, hasAlpha: true));
     }
 
     /// <summary>
@@ -425,7 +425,7 @@ public sealed class ImageEngine : IDisposable
         if (wrap && format == PixelFormat.Rgba32
             && Backend.TryWrapPixels(pixels, width, height, stride, ownsMemory: false, out IFrame wrapped))
         {
-            return new FacadeImage(this, Backend, wrapped, new ImageMetadata(ImageFormat.Unknown, width, height, 0, hasAlpha: true));
+            return new FacadeImage(this, wrapped, new ImageMetadata(ImageFormat.Unknown, width, height, 0, hasAlpha: true));
         }
 
         var source = new ReadOnlySpan<byte>((void*)pixels, checked(stride * height));
